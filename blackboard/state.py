@@ -63,6 +63,16 @@ class Feedback(BaseModel):
     model_config = {"extra": "allow"}
 
 
+class StateConflictError(Exception):
+    """
+    Raised when a state save detects a version conflict.
+    
+    This prevents "last write wins" data loss when multiple agents/processes
+    try to update the state file concurrently.
+    """
+    pass
+
+
 class Blackboard(BaseModel):
     """
     The Shared Global State - the central hub that all agents read from and write to.
@@ -75,6 +85,7 @@ class Blackboard(BaseModel):
     """
     goal: str = Field(..., description="The immutable objective for this session")
     status: Status = Field(default=Status.PLANNING, description="Current execution phase")
+    version: int = Field(default=1, description="Optimistic locking version number")
     artifacts: List[Artifact] = Field(default_factory=list, description="Versioned outputs")
     feedback: List[Feedback] = Field(default_factory=list, description="Critique log")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extensible context")

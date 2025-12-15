@@ -349,7 +349,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             if decision.action == "done":
                 state.update_status(Status.DONE)
                 logger.info("Goal achieved!")
-                self.middleware.after_step(step_ctx)
+                await self.middleware.after_step(step_ctx)
                 await self._publish_event(EventType.STEP_COMPLETED, {
                     "step": state.step_count,
                     "action": "done"
@@ -359,7 +359,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             if decision.action == "fail":
                 state.update_status(Status.FAILED)
                 logger.warning("Goal failed")
-                self.middleware.after_step(step_ctx)
+                await self.middleware.after_step(step_ctx)
                 await self._publish_event(EventType.STEP_COMPLETED, {
                     "step": state.step_count,
                     "action": "fail"
@@ -375,7 +375,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
                 await self._execute_workers_parallel(state, decision.calls)
             
             # After step middleware hook
-            self.middleware.after_step(step_ctx)
+            await self.middleware.after_step(step_ctx)
             
             # Check if middleware skipped further execution
             if step_ctx.skip_step:
