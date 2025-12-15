@@ -63,7 +63,8 @@ class TestMiddleware:
         assert ctx.skip_step is False
         assert ctx.modified_decision is None
     
-    def test_middleware_before_step(self):
+    @pytest.mark.asyncio
+    async def test_middleware_before_step(self):
         """Test before_step hook."""
         stack = MiddlewareStack()
         calls = []
@@ -71,32 +72,33 @@ class TestMiddleware:
         class TrackingMiddleware(Middleware):
             name = "Tracker"
             
-            def before_step(self, ctx: StepContext):
+            async def before_step(self, ctx: StepContext):
                 calls.append("before")
         
         stack.add(TrackingMiddleware())
         
         state = Blackboard(goal="Test")
         ctx = StepContext(step_number=1, state=state)
-        stack.before_step(ctx)
+        await stack.before_step(ctx)
         
         assert calls == ["before"]
     
-    def test_middleware_skip_step(self):
+    @pytest.mark.asyncio
+    async def test_middleware_skip_step(self):
         """Test middleware can skip step."""
         stack = MiddlewareStack()
         
         class SkipMiddleware(Middleware):
             name = "Skipper"
             
-            def before_step(self, ctx: StepContext):
+            async def before_step(self, ctx: StepContext):
                 ctx.skip_step = True
         
         stack.add(SkipMiddleware())
         
         state = Blackboard(goal="Test")
         ctx = StepContext(step_number=1, state=state)
-        stack.before_step(ctx)
+        await stack.before_step(ctx)
         
         assert ctx.skip_step is True
     
@@ -108,10 +110,10 @@ class TestMiddleware:
         class RecordingMiddleware(Middleware):
             name = "Recorder"
             
-            def before_step(self, ctx: StepContext):
+            async def before_step(self, ctx: StepContext):
                 calls.append(f"before_step_{ctx.step_number}")
             
-            def after_step(self, ctx: StepContext):
+            async def after_step(self, ctx: StepContext):
                 calls.append(f"after_step_{ctx.step_number}")
         
         llm = MockLLM(['{"action": "done", "reasoning": "Quick"}'])

@@ -47,17 +47,13 @@ class Middleware(ABC):
     - Before/after each step
     - Before/after each worker execution
     
-    .. note::
-        All middleware methods are async to support async LLM clients,
-        database calls, and other async operations.
-    
     Example:
         class BudgetMiddleware(Middleware):
             def __init__(self, max_cost: float):
                 self.max_cost = max_cost
                 self.total_cost = 0.0
             
-            async def after_step(self, ctx: StepContext) -> None:
+            def after_step(self, ctx: StepContext) -> None:
                 usage = ctx.state.metadata.get("usage", {})
                 self.total_cost += usage.get("step_cost", 0)
                 if self.total_cost > self.max_cost:
@@ -67,23 +63,23 @@ class Middleware(ABC):
     
     name: str = "UnnamedMiddleware"
     
-    async def before_step(self, ctx: StepContext) -> None:
+    def before_step(self, ctx: StepContext) -> None:
         """Called before each orchestration step."""
         pass
     
-    async def after_step(self, ctx: StepContext) -> None:
+    def after_step(self, ctx: StepContext) -> None:
         """Called after each orchestration step."""
         pass
     
-    async def before_worker(self, ctx: WorkerContext) -> None:
+    def before_worker(self, ctx: WorkerContext) -> None:
         """Called before a worker is executed."""
         pass
     
-    async def after_worker(self, ctx: WorkerContext) -> None:
+    def after_worker(self, ctx: WorkerContext) -> None:
         """Called after a worker is executed."""
         pass
     
-    async def on_error(self, ctx: WorkerContext) -> None:
+    def on_error(self, ctx: WorkerContext) -> None:
         """Called when a worker raises an exception."""
         pass
 
@@ -111,34 +107,34 @@ class MiddlewareStack:
                 return True
         return False
     
-    async def before_step(self, ctx: StepContext) -> None:
+    def before_step(self, ctx: StepContext) -> None:
         """Run all before_step hooks."""
         for middleware in self._middleware:
-            await middleware.before_step(ctx)
+            middleware.before_step(ctx)
             if ctx.skip_step:
                 break
     
-    async def after_step(self, ctx: StepContext) -> None:
+    def after_step(self, ctx: StepContext) -> None:
         """Run all after_step hooks (reverse order)."""
         for middleware in reversed(self._middleware):
-            await middleware.after_step(ctx)
+            middleware.after_step(ctx)
     
-    async def before_worker(self, ctx: WorkerContext) -> None:
+    def before_worker(self, ctx: WorkerContext) -> None:
         """Run all before_worker hooks."""
         for middleware in self._middleware:
-            await middleware.before_worker(ctx)
+            middleware.before_worker(ctx)
             if ctx.skip_worker:
                 break
     
-    async def after_worker(self, ctx: WorkerContext) -> None:
+    def after_worker(self, ctx: WorkerContext) -> None:
         """Run all after_worker hooks (reverse order)."""
         for middleware in reversed(self._middleware):
-            await middleware.after_worker(ctx)
+            middleware.after_worker(ctx)
     
-    async def on_error(self, ctx: WorkerContext) -> None:
+    def on_error(self, ctx: WorkerContext) -> None:
         """Run all on_error hooks."""
         for middleware in self._middleware:
-            await middleware.on_error(ctx)
+            middleware.on_error(ctx)
     
     def __len__(self) -> int:
         return len(self._middleware)
@@ -177,7 +173,7 @@ class BudgetMiddleware(Middleware):
         self.total_tokens = 0
         self.total_cost = 0.0
     
-    async def after_step(self, ctx: StepContext) -> None:
+    def after_step(self, ctx: StepContext) -> None:
         """Check budget after each step."""
         usage = ctx.state.metadata.get("last_usage", {})
         
@@ -233,19 +229,19 @@ class LoggingMiddleware(Middleware):
         import logging
         self.logger = logger or logging.getLogger("blackboard.middleware")
     
-    async def before_step(self, ctx: StepContext) -> None:
+    def before_step(self, ctx: StepContext) -> None:
         self.logger.debug(f"[Step {ctx.step_number}] Starting")
     
-    async def after_step(self, ctx: StepContext) -> None:
+    def after_step(self, ctx: StepContext) -> None:
         self.logger.debug(f"[Step {ctx.step_number}] Completed")
     
-    async def before_worker(self, ctx: WorkerContext) -> None:
+    def before_worker(self, ctx: WorkerContext) -> None:
         self.logger.info(f"[Worker] Calling {ctx.worker.name}")
     
-    async def after_worker(self, ctx: WorkerContext) -> None:
+    def after_worker(self, ctx: WorkerContext) -> None:
         self.logger.info(f"[Worker] {ctx.worker.name} completed")
     
-    async def on_error(self, ctx: WorkerContext) -> None:
+    def on_error(self, ctx: WorkerContext) -> None:
         self.logger.error(f"[Worker] {ctx.worker.name} failed: {ctx.error}")
 
 
@@ -309,7 +305,7 @@ class HumanApprovalMiddleware(Middleware):
         """
         raise ApprovalRequired(worker_name, instructions)
     
-    async def before_worker(self, ctx: WorkerContext) -> None:
+    def before_worker(self, ctx: WorkerContext) -> None:
         if ctx.worker.name in self.require_approval_for:
             approved = self.approval_callback(ctx.worker.name, ctx.call.instructions)
             if not approved:
@@ -383,7 +379,7 @@ Provide a 2-3 paragraph summary that captures the essential context:'''
         self.keep_recent_feedback = keep_recent_feedback
         self._last_summarized_step = 0
     
-    async def after_step(self, ctx: StepContext) -> None:
+    def after_step(self, ctx: StepContext) -> None:
         """Check if summarization is needed after each step."""
         state = ctx.state
         
@@ -396,10 +392,10 @@ Provide a 2-3 paragraph summary that captures the essential context:'''
         
         # Don't summarize too frequently
         if should_summarize and (state.step_count - self._last_summarized_step) >= 5:
-            await self._summarize(state)
+            self._summarize(state)
             self._last_summarized_step = state.step_count
     
-    async def _summarize(self, state) -> None:
+    def _summarize(self, state) -> None:
         """Perform the summarization."""
         import asyncio
         
@@ -437,9 +433,9 @@ Provide a 2-3 paragraph summary that captures the essential context:'''
         
         try:
             result = self.llm.generate(prompt)
-            # Properly await async LLM results
             if asyncio.iscoroutine(result):
-                result = await result
+                # Can't await in sync context, skip summarization
+                return
             
             # Handle LLMResponse or string
             if hasattr(result, 'content'):
