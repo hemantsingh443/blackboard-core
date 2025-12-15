@@ -33,11 +33,19 @@ from .events import EventBus, Event, EventType, get_event_bus, reset_event_bus
 from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, NO_RETRY, is_transient_error
 from .middleware import (
     Middleware, MiddlewareStack, StepContext, WorkerContext,
-    BudgetMiddleware, LoggingMiddleware, HumanApprovalMiddleware
+    BudgetMiddleware, LoggingMiddleware, HumanApprovalMiddleware, AutoSummarizationMiddleware
 )
 from .usage import LLMResponse, LLMUsage, UsageTracker, UsageRecord, MODEL_PRICING, create_openai_tracker
+from .tools import (
+    ToolDefinition, ToolParameter, ToolCall, ToolCallResponse,
+    ToolCallingLLMClient, worker_to_tool_definition, workers_to_tool_definitions,
+    DONE_TOOL, FAIL_TOOL
+)
+from .memory import (
+    Memory, MemoryEntry, SearchResult, SimpleVectorMemory, MemoryWorker, MemoryInput
+)
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     # State models
@@ -81,9 +89,27 @@ __all__ = [
     "BudgetMiddleware",
     "LoggingMiddleware",
     "HumanApprovalMiddleware",
+    "AutoSummarizationMiddleware",
     # Usage Tracking
     "UsageTracker",
     "UsageRecord",
     "MODEL_PRICING",
     "create_openai_tracker",
+    # Tool Calling
+    "ToolDefinition",
+    "ToolParameter",
+    "ToolCall",
+    "ToolCallResponse",
+    "ToolCallingLLMClient",
+    "worker_to_tool_definition",
+    "workers_to_tool_definitions",
+    "DONE_TOOL",
+    "FAIL_TOOL",
+    # Memory
+    "Memory",
+    "MemoryEntry",
+    "SearchResult",
+    "SimpleVectorMemory",
+    "MemoryWorker",
+    "MemoryInput",
 ]

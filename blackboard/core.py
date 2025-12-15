@@ -18,6 +18,11 @@ from .events import EventBus, Event, EventType, get_event_bus
 from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, is_transient_error
 from .usage import LLMResponse, LLMUsage, UsageTracker
 from .middleware import Middleware, MiddlewareStack, StepContext, WorkerContext
+from .tools import (
+    ToolDefinition, ToolCall, ToolCallingLLMClient, 
+    worker_to_tool_definition, workers_to_tool_definitions,
+    DONE_TOOL, FAIL_TOOL
+)
 
 
 # Configure module logger
@@ -189,7 +194,10 @@ You MUST respond with valid JSON in one of these formats:
         auto_save_path: Optional[str] = None,
         enable_parallel: bool = True,
         middleware: Optional[List[Middleware]] = None,
-        usage_tracker: Optional[UsageTracker] = None
+        usage_tracker: Optional[UsageTracker] = None,
+        use_tool_calling: bool = True,
+        auto_summarize: bool = False,
+        summarize_thresholds: Optional[Dict[str, int]] = None
     ):
         """
         Initialize the orchestrator.
@@ -205,6 +213,9 @@ You MUST respond with valid JSON in one of these formats:
             enable_parallel: If True, allow parallel worker execution
             middleware: List of middleware to add to the stack
             usage_tracker: Tracker for LLM token usage and costs
+            use_tool_calling: If True, use native tool calling when LLM supports it
+            auto_summarize: If True, automatically summarize context when thresholds exceeded
+            summarize_thresholds: Custom thresholds for summarization
         """
         self.llm = llm
         self.registry = WorkerRegistry()
@@ -217,6 +228,22 @@ You MUST respond with valid JSON in one of these formats:
         self.auto_save_path = auto_save_path
         self.enable_parallel = enable_parallel
         self.usage_tracker = usage_tracker
+        self.use_tool_calling = use_tool_calling
+        self.auto_summarize = auto_summarize
+        self.summarize_thresholds = summarize_thresholds or {
+            "artifacts": 10,
+            "feedback": 20,
+            "steps": 50
+        }
+        
+        # Check if LLM supports tool calling
+        self._supports_tool_calling = isinstance(llm, ToolCallingLLMClient)
+        
+        # Cache tool definitions if tool calling is available
+        self._tool_definitions: List[ToolDefinition] = []
+        if self._supports_tool_calling and use_tool_calling:
+            self._tool_definitions = workers_to_tool_definitions(workers)
+            self._tool_definitions.extend([DONE_TOOL, FAIL_TOOL])
         
         # Initialize middleware stack
         self.middleware = MiddlewareStack()
@@ -276,6 +303,14 @@ You MUST respond with valid JSON in one of these formats:
             
             await self._publish_event(EventType.STEP_STARTED, {"step": state.step_count})
             logger.debug(f"Step {state.step_count}")
+            
+            # Auto-summarize if enabled and thresholds exceeded
+            if self.auto_summarize and state.should_summarize(
+                artifact_threshold=self.summarize_thresholds.get("artifacts", 10),
+                feedback_threshold=self.summarize_thresholds.get("feedback", 20),
+                step_threshold=self.summarize_thresholds.get("steps", 50)
+            ):
+                await self._auto_summarize(state)
             
             # Create step context for middleware
             step_ctx = StepContext(step_number=state.step_count, state=state)
@@ -561,8 +596,149 @@ You MUST respond with valid JSON in one of these formats:
         """Synchronous wrapper for run()."""
         return asyncio.run(self.run(goal=goal, state=state, max_steps=max_steps))
 
+    async def _auto_summarize(self, state: Blackboard) -> None:
+        """Automatically summarize context when thresholds are exceeded."""
+        logger.info("Auto-summarizing context...")
+        
+        # Build history text for summarization
+        history_parts = []
+        
+        if state.context_summary:
+            history_parts.append(f"Previous Summary:\n{state.context_summary}")
+        
+        history_parts.append(f"\nSteps completed: {state.step_count}")
+        
+        # Include artifacts beyond keep threshold
+        keep_artifacts = 3
+        if len(state.artifacts) > keep_artifacts:
+            old_artifacts = state.artifacts[:-keep_artifacts]
+            history_parts.append("\nArtifacts to summarize:")
+            for a in old_artifacts:
+                preview = str(a.content)[:200]
+                history_parts.append(f"- {a.type} by {a.creator}: {preview}")
+        
+        # Include feedback beyond keep threshold
+        keep_feedback = 5
+        if len(state.feedback) > keep_feedback:
+            old_feedback = state.feedback[:-keep_feedback]
+            history_parts.append("\nFeedback to summarize:")
+            for f in old_feedback:
+                status = "PASSED" if f.passed else "FAILED"
+                history_parts.append(f"- [{status}] {f.source}: {f.critique[:100]}")
+        
+        history_text = "\n".join(history_parts)
+        
+        # Generate summary using LLM
+        summarize_prompt = f'''Summarize the following session history into a concise summary.
+Focus on key decisions, artifacts created, and feedback received.
+
+Goal: {state.goal}
+
+History:
+{history_text}
+
+Provide a 1-2 paragraph summary:'''
+        
+        try:
+            result = self.llm.generate(summarize_prompt)
+            if asyncio.iscoroutine(result):
+                response = await result
+            else:
+                response = result
+            
+            # Handle LLMResponse or string
+            if isinstance(response, LLMResponse):
+                summary = response.content
+            else:
+                summary = response
+            
+            # Update state
+            state.update_summary(summary)
+            
+            # Compact: keep only recent items
+            if len(state.artifacts) > keep_artifacts:
+                state.artifacts = state.artifacts[-keep_artifacts:]
+            if len(state.feedback) > keep_feedback:
+                state.feedback = state.feedback[-keep_feedback:]
+            
+            state.compact_history(keep_last=10)
+            
+            logger.info("Context summarized and compacted")
+            await self._publish_event(EventType.STEP_COMPLETED, {
+                "action": "auto_summarize",
+                "summary_length": len(summary)
+            })
+            
+        except Exception as e:
+            logger.warning(f"Auto-summarization failed: {e}")
+
+
     async def _get_supervisor_decision(self, context: str, state: Blackboard) -> SupervisorDecision:
         """Ask the LLM supervisor what to do next."""
+        
+        # Use tool calling if available
+        if self._supports_tool_calling and self.use_tool_calling and self._tool_definitions:
+            return await self._get_decision_via_tools(context, state)
+        
+        # Fallback to JSON-based approach
+        return await self._get_decision_via_json(context, state)
+    
+    async def _get_decision_via_tools(self, context: str, state: Blackboard) -> SupervisorDecision:
+        """Get decision using native tool calling."""
+        simple_prompt = f"""You are a supervisor coordinating workers to achieve the goal.
+
+## Current State
+{context}
+
+Choose the best action: call a worker tool, mark_done if complete, or mark_failed if impossible."""
+        
+        try:
+            result = self.llm.generate_with_tools(simple_prompt, self._tool_definitions)
+            if asyncio.iscoroutine(result):
+                response = await result
+            else:
+                response = result
+            
+            # Handle tool calls
+            if isinstance(response, list) and response:
+                # LLM returned tool calls
+                calls = []
+                for tool_call in response:
+                    if isinstance(tool_call, ToolCall):
+                        if tool_call.name == "mark_done":
+                            return SupervisorDecision(
+                                action="done",
+                                reasoning=tool_call.arguments.get("reason", "Goal achieved")
+                            )
+                        elif tool_call.name == "mark_failed":
+                            return SupervisorDecision(
+                                action="fail",
+                                reasoning=tool_call.arguments.get("reason", "Cannot complete")
+                            )
+                        else:
+                            # Worker call
+                            calls.append(WorkerCall(
+                                worker_name=tool_call.name,
+                                instructions=tool_call.arguments.get("instructions", ""),
+                                inputs=tool_call.arguments
+                            ))
+                
+                if calls:
+                    action = "call_parallel" if len(calls) > 1 else "call"
+                    return SupervisorDecision(action=action, calls=calls, reasoning="Via tool calling")
+            
+            # String response - fall back to JSON parsing
+            if isinstance(response, str):
+                return self._parse_llm_response(response)
+            
+            return SupervisorDecision(action="fail", reasoning="Unexpected response format")
+            
+        except Exception as e:
+            logger.warning(f"Tool calling failed, falling back to JSON: {e}")
+            return await self._get_decision_via_json(context, state)
+    
+    async def _get_decision_via_json(self, context: str, state: Blackboard) -> SupervisorDecision:
+        """Get decision using JSON-based prompting."""
         # Build the worker list with schemas
         worker_info = self.registry.list_workers_with_schemas()
         worker_lines = []

@@ -271,3 +271,146 @@ class HumanApprovalMiddleware(Middleware):
                 ctx.skip_worker = True
                 ctx.state.metadata["skipped_workers"] = ctx.state.metadata.get("skipped_workers", [])
                 ctx.state.metadata["skipped_workers"].append(ctx.worker.name)
+
+
+class AutoSummarizationMiddleware(Middleware):
+    """
+    Automatically summarizes context when it grows too large.
+    
+    Uses the LLM to compress history and artifacts into a summary,
+    then clears the raw data to free up context window space.
+    
+    Example:
+        summarizer = AutoSummarizationMiddleware(
+            llm=my_llm,
+            artifact_threshold=10,
+            step_threshold=20
+        )
+        orchestrator = Orchestrator(..., middleware=[summarizer])
+    """
+    
+    name = "AutoSummarizationMiddleware"
+    
+    SUMMARIZE_PROMPT = '''Summarize the following session history into a concise summary.
+Focus on:
+1. Key decisions made
+2. Important artifacts created
+3. Feedback received
+4. Current progress toward the goal
+
+Goal: {goal}
+
+History:
+{history}
+
+Provide a 2-3 paragraph summary that captures the essential context:'''
+    
+    def __init__(
+        self,
+        llm,
+        artifact_threshold: int = 10,
+        step_threshold: int = 20,
+        feedback_threshold: int = 15,
+        keep_recent_artifacts: int = 3,
+        keep_recent_feedback: int = 3
+    ):
+        """
+        Initialize the summarization middleware.
+        
+        Args:
+            llm: LLM client to use for summarization
+            artifact_threshold: Summarize when artifacts exceed this
+            step_threshold: Summarize when steps exceed this
+            feedback_threshold: Summarize when feedback exceeds this
+            keep_recent_artifacts: Keep this many recent artifacts
+            keep_recent_feedback: Keep this many recent feedback entries
+        """
+        self.llm = llm
+        self.artifact_threshold = artifact_threshold
+        self.step_threshold = step_threshold
+        self.feedback_threshold = feedback_threshold
+        self.keep_recent_artifacts = keep_recent_artifacts
+        self.keep_recent_feedback = keep_recent_feedback
+        self._last_summarized_step = 0
+    
+    def after_step(self, ctx: StepContext) -> None:
+        """Check if summarization is needed after each step."""
+        state = ctx.state
+        
+        # Check thresholds
+        should_summarize = (
+            len(state.artifacts) > self.artifact_threshold or
+            state.step_count > self.step_threshold or
+            len(state.feedback) > self.feedback_threshold
+        )
+        
+        # Don't summarize too frequently
+        if should_summarize and (state.step_count - self._last_summarized_step) >= 5:
+            self._summarize(state)
+            self._last_summarized_step = state.step_count
+    
+    def _summarize(self, state) -> None:
+        """Perform the summarization."""
+        import asyncio
+        
+        # Build history text
+        history_parts = []
+        
+        if state.context_summary:
+            history_parts.append(f"Previous Summary:\n{state.context_summary}")
+        
+        history_parts.append(f"\nSteps completed: {state.step_count}")
+        
+        # Include older artifacts (the ones we'll compress)
+        old_artifacts = state.artifacts[:-self.keep_recent_artifacts] if len(state.artifacts) > self.keep_recent_artifacts else []
+        if old_artifacts:
+            history_parts.append("\nArtifacts to summarize:")
+            for a in old_artifacts:
+                preview = str(a.content)[:200]
+                history_parts.append(f"- {a.type} by {a.creator}: {preview}")
+        
+        # Include older feedback
+        old_feedback = state.feedback[:-self.keep_recent_feedback] if len(state.feedback) > self.keep_recent_feedback else []
+        if old_feedback:
+            history_parts.append("\nFeedback to summarize:")
+            for f in old_feedback:
+                status = "PASSED" if f.passed else "FAILED"
+                history_parts.append(f"- [{status}] {f.source}: {f.critique[:100]}")
+        
+        history_text = "\n".join(history_parts)
+        
+        # Generate summary
+        prompt = self.SUMMARIZE_PROMPT.format(
+            goal=state.goal,
+            history=history_text
+        )
+        
+        try:
+            result = self.llm.generate(prompt)
+            if asyncio.iscoroutine(result):
+                # Can't await in sync context, skip summarization
+                return
+            
+            # Handle LLMResponse or string
+            if hasattr(result, 'content'):
+                summary = result.content
+            else:
+                summary = result
+            
+            # Update state
+            state.update_summary(summary)
+            
+            # Compact: keep only recent artifacts and feedback
+            if len(state.artifacts) > self.keep_recent_artifacts:
+                state.artifacts = state.artifacts[-self.keep_recent_artifacts:]
+            
+            if len(state.feedback) > self.keep_recent_feedback:
+                state.feedback = state.feedback[-self.keep_recent_feedback:]
+            
+            # Compact history
+            state.compact_history(keep_last=10)
+            
+        except Exception as e:
+            import logging
+            logging.getLogger("blackboard.middleware").warning(f"Summarization failed: {e}")
+
