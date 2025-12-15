@@ -10,7 +10,7 @@ Quick Start:
         name = "Writer"
         description = "Generates text content"
         
-        async def run(self, state: Blackboard) -> WorkerOutput:
+        async def run(self, state: Blackboard, inputs=None) -> WorkerOutput:
             return WorkerOutput(
                 artifact=Artifact(type="text", content="Hello!", creator=self.name)
             )
@@ -25,11 +25,19 @@ Quick Start:
 
 from .state import Artifact, Feedback, Blackboard, Status
 from .protocols import Worker, WorkerOutput, WorkerRegistry, WorkerInput
-from .core import Orchestrator, LLMClient, SupervisorDecision, WorkerCall, run_blackboard, run_blackboard_sync
+from .core import (
+    Orchestrator, LLMClient, SupervisorDecision, WorkerCall, 
+    run_blackboard, run_blackboard_sync, LLMResult
+)
 from .events import EventBus, Event, EventType, get_event_bus, reset_event_bus
 from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, NO_RETRY, is_transient_error
+from .middleware import (
+    Middleware, MiddlewareStack, StepContext, WorkerContext,
+    BudgetMiddleware, LoggingMiddleware, HumanApprovalMiddleware
+)
+from .usage import LLMResponse, LLMUsage, UsageTracker, UsageRecord, MODEL_PRICING, create_openai_tracker
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     # State models
@@ -49,6 +57,10 @@ __all__ = [
     "WorkerCall",
     "run_blackboard",
     "run_blackboard_sync",
+    # LLM Response
+    "LLMResult",
+    "LLMResponse",
+    "LLMUsage",
     # Events
     "EventBus",
     "Event",
@@ -61,4 +73,17 @@ __all__ = [
     "DEFAULT_RETRY_POLICY",
     "NO_RETRY",
     "is_transient_error",
+    # Middleware
+    "Middleware",
+    "MiddlewareStack",
+    "StepContext",
+    "WorkerContext",
+    "BudgetMiddleware",
+    "LoggingMiddleware",
+    "HumanApprovalMiddleware",
+    # Usage Tracking
+    "UsageTracker",
+    "UsageRecord",
+    "MODEL_PRICING",
+    "create_openai_tracker",
 ]

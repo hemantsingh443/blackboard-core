@@ -79,6 +79,7 @@ class Blackboard(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extensible context")
     step_count: int = Field(default=0, description="Number of steps executed")
     history: List[Dict[str, Any]] = Field(default_factory=list, description="Execution history log")
+    context_summary: str = Field(default="", description="Summary of earlier context (for long sessions)")
 
     model_config = {"extra": "allow"}
 
@@ -230,6 +231,10 @@ class Blackboard(BaseModel):
             f"\n## Status\n{self.status.value.upper()}",
         ]
         
+        # Include context summary if available (for long sessions)
+        if self.context_summary:
+            lines.append(f"\n## Previous Context Summary\n{self.context_summary}")
+        
         # Add recent artifacts (sliding window)
         recent_artifacts = self.artifacts[-max_artifacts:] if self.artifacts else []
         if recent_artifacts:
@@ -280,3 +285,56 @@ class Blackboard(BaseModel):
             f"Feedback: {feedback_count} | "
             f"Last Review: {'Passed' if last_passed else 'Failed' if last_passed is not None else 'N/A'}"
         )
+
+    def update_summary(self, summary: str) -> None:
+        """
+        Update the context summary for long-running sessions.
+        
+        Call this when the context grows too large to fit in the LLM window.
+        The summary will be included in to_context_string() output.
+        
+        Args:
+            summary: A compressed summary of earlier context
+        """
+        self.context_summary = summary
+        self._log_event("summary_updated", {"length": len(summary)})
+    
+    def should_summarize(
+        self,
+        artifact_threshold: int = 10,
+        feedback_threshold: int = 20,
+        step_threshold: int = 50
+    ) -> bool:
+        """
+        Check if the context should be summarized.
+        
+        Returns True if any threshold is exceeded.
+        
+        Args:
+            artifact_threshold: Summarize if artifacts exceed this count
+            feedback_threshold: Summarize if feedback exceeds this count
+            step_threshold: Summarize if steps exceed this count
+        """
+        return (
+            len(self.artifacts) > artifact_threshold or
+            len(self.feedback) > feedback_threshold or
+            self.step_count > step_threshold
+        )
+    
+    def compact_history(self, keep_last: int = 20) -> int:
+        """
+        Compact the history log by keeping only recent entries.
+        
+        Args:
+            keep_last: Number of recent history entries to keep
+            
+        Returns:
+            Number of entries removed
+        """
+        if len(self.history) <= keep_last:
+            return 0
+        
+        removed = len(self.history) - keep_last
+        self.history = self.history[-keep_last:]
+        return removed
+

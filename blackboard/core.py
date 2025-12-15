@@ -16,10 +16,16 @@ from .state import Blackboard, Status, Artifact, Feedback
 from .protocols import Worker, WorkerOutput, WorkerRegistry, WorkerInput
 from .events import EventBus, Event, EventType, get_event_bus
 from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, is_transient_error
+from .usage import LLMResponse, LLMUsage, UsageTracker
+from .middleware import Middleware, MiddlewareStack, StepContext, WorkerContext
 
 
 # Configure module logger
 logger = logging.getLogger("blackboard")
+
+
+# Type for LLM responses - can be string or LLMResponse
+LLMResult = Union[str, LLMResponse]
 
 
 @runtime_checkable
@@ -27,24 +33,30 @@ class LLMClient(Protocol):
     """
     Protocol for LLM providers.
     
-    Any class with a `generate(prompt: str) -> str` method works.
-    Supports both sync and async implementations.
+    Supports returning either:
+    - str: Simple text response (backward compatible)
+    - LLMResponse: Structured response with usage stats
     
     Examples:
-        # OpenAI-style client (sync)
-        class OpenAIClient:
+        # Simple string response
+        class SimpleLLM:
             def generate(self, prompt: str) -> str:
-                response = openai.chat.completions.create(...)
-                return response.choices[0].message.content
+                return "response text"
         
-        # Anthropic-style client (async)
-        class AnthropicClient:
-            async def generate(self, prompt: str) -> str:
-                response = await anthropic.messages.create(...)
-                return response.content[0].text
+        # With usage tracking
+        class OpenAIClient:
+            def generate(self, prompt: str) -> LLMResponse:
+                response = openai.chat.completions.create(...)
+                return LLMResponse(
+                    content=response.choices[0].message.content,
+                    usage=LLMUsage(
+                        input_tokens=response.usage.prompt_tokens,
+                        output_tokens=response.usage.completion_tokens
+                    )
+                )
     """
     
-    def generate(self, prompt: str) -> Union[str, Awaitable[str]]:
+    def generate(self, prompt: str) -> Union[LLMResult, Awaitable[LLMResult]]:
         """Generate a response for the given prompt."""
         ...
 
@@ -175,7 +187,9 @@ You MUST respond with valid JSON in one of these formats:
         event_bus: Optional[EventBus] = None,
         retry_policy: Optional[RetryPolicy] = None,
         auto_save_path: Optional[str] = None,
-        enable_parallel: bool = True
+        enable_parallel: bool = True,
+        middleware: Optional[List[Middleware]] = None,
+        usage_tracker: Optional[UsageTracker] = None
     ):
         """
         Initialize the orchestrator.
@@ -189,6 +203,8 @@ You MUST respond with valid JSON in one of these formats:
             retry_policy: Retry policy for worker execution (default: 3 retries)
             auto_save_path: If provided, auto-save state after each step
             enable_parallel: If True, allow parallel worker execution
+            middleware: List of middleware to add to the stack
+            usage_tracker: Tracker for LLM token usage and costs
         """
         self.llm = llm
         self.registry = WorkerRegistry()
@@ -200,6 +216,13 @@ You MUST respond with valid JSON in one of these formats:
         self.retry_policy = retry_policy or DEFAULT_RETRY_POLICY
         self.auto_save_path = auto_save_path
         self.enable_parallel = enable_parallel
+        self.usage_tracker = usage_tracker
+        
+        # Initialize middleware stack
+        self.middleware = MiddlewareStack()
+        if middleware:
+            for mw in middleware:
+                self.middleware.add(mw)
         
         # Configure logging based on verbose flag
         if verbose and not logger.handlers:
@@ -254,11 +277,21 @@ You MUST respond with valid JSON in one of these formats:
             await self._publish_event(EventType.STEP_STARTED, {"step": state.step_count})
             logger.debug(f"Step {state.step_count}")
             
+            # Create step context for middleware
+            step_ctx = StepContext(step_number=state.step_count, state=state)
+            
+            # Before step middleware hook
+            self.middleware.before_step(step_ctx)
+            if step_ctx.skip_step:
+                logger.debug("Step skipped by middleware")
+                continue
+            
             # 1. OBSERVE: Build context
             context = state.to_context_string()
             
             # 2. REASON: Ask LLM for next action
-            decision = await self._get_supervisor_decision(context)
+            decision = await self._get_supervisor_decision(context, state)
+            step_ctx.decision = decision
             
             logger.debug(f"Decision: {decision.action} -> {[c.worker_name for c in decision.calls]}")
             logger.debug(f"Reasoning: {decision.reasoning}")
@@ -271,6 +304,7 @@ You MUST respond with valid JSON in one of these formats:
             if decision.action == "done":
                 state.update_status(Status.DONE)
                 logger.info("Goal achieved!")
+                self.middleware.after_step(step_ctx)
                 await self._publish_event(EventType.STEP_COMPLETED, {
                     "step": state.step_count,
                     "action": "done"
@@ -280,6 +314,7 @@ You MUST respond with valid JSON in one of these formats:
             if decision.action == "fail":
                 state.update_status(Status.FAILED)
                 logger.warning("Goal failed")
+                self.middleware.after_step(step_ctx)
                 await self._publish_event(EventType.STEP_COMPLETED, {
                     "step": state.step_count,
                     "action": "fail"
@@ -293,6 +328,13 @@ You MUST respond with valid JSON in one of these formats:
             elif decision.action == "call_parallel" and decision.calls:
                 # Parallel worker calls
                 await self._execute_workers_parallel(state, decision.calls)
+            
+            # After step middleware hook
+            self.middleware.after_step(step_ctx)
+            
+            # Check if middleware skipped further execution
+            if step_ctx.skip_step:
+                break
             
             await self._publish_event(EventType.STEP_COMPLETED, {
                 "step": state.step_count,
@@ -519,7 +561,7 @@ You MUST respond with valid JSON in one of these formats:
         """Synchronous wrapper for run()."""
         return asyncio.run(self.run(goal=goal, state=state, max_steps=max_steps))
 
-    async def _get_supervisor_decision(self, context: str) -> SupervisorDecision:
+    async def _get_supervisor_decision(self, context: str, state: Blackboard) -> SupervisorDecision:
         """Ask the LLM supervisor what to do next."""
         # Build the worker list with schemas
         worker_info = self.registry.list_workers_with_schemas()
@@ -541,7 +583,25 @@ You MUST respond with valid JSON in one of these formats:
                 response = await result
             else:
                 response = result
-            return self._parse_llm_response(response)
+            
+            # Handle LLMResponse or plain string
+            content: str
+            if isinstance(response, LLMResponse):
+                content = response.content
+                # Track usage
+                if response.usage and self.usage_tracker:
+                    self.usage_tracker.record(response.usage, context="supervisor")
+                # Store in state metadata
+                if response.usage:
+                    state.metadata["last_usage"] = {
+                        "input_tokens": response.usage.input_tokens,
+                        "output_tokens": response.usage.output_tokens,
+                        "model": response.usage.model
+                    }
+            else:
+                content = response
+            
+            return self._parse_llm_response(content)
         except Exception as e:
             logger.error(f"LLM error: {e}")
             return SupervisorDecision(
@@ -551,8 +611,21 @@ You MUST respond with valid JSON in one of these formats:
 
     def _parse_llm_response(self, response: str) -> SupervisorDecision:
         """Parse the JSON response from the LLM."""
-        # Try to find and parse the full JSON object
-        # Handle nested objects by finding matching braces
+        
+        # First, try to extract JSON from markdown code blocks
+        def extract_from_code_block(text: str) -> Optional[str]:
+            """Extract JSON from ```json ... ``` blocks."""
+            patterns = [
+                r'```json\s*\n?(.*?)\n?```',  # ```json ... ```
+                r'```\s*\n?(.*?)\n?```',       # ``` ... ```
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+                if match:
+                    return match.group(1).strip()
+            return None
+        
+        # Try to find JSON object with matching braces
         def find_json_object(text: str) -> Optional[str]:
             start = text.find('{')
             if start == -1:
@@ -568,36 +641,57 @@ You MUST respond with valid JSON in one of these formats:
                         return text[start:i+1]
             return None
         
-        json_str = find_json_object(response)
+        # Try basic JSON repair for common issues
+        def repair_json(text: str) -> str:
+            """Attempt to fix common JSON issues."""
+            # Remove trailing commas before } or ]
+            text = re.sub(r',\s*([\}\]])', r'\1', text)
+            # Fix single quotes to double quotes
+            text = text.replace("'", '"')
+            # Fix unquoted keys
+            text = re.sub(r'(\{|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1 "\2":', text)
+            return text
+        
+        # Try extraction methods in order
+        json_str = extract_from_code_block(response)
+        if not json_str:
+            json_str = find_json_object(response)
         
         if json_str:
-            try:
-                data = json.loads(json_str)
-                action = data.get("action", "fail")
-                reasoning = data.get("reasoning", "")
-                
-                # Parse calls
-                calls = []
-                if action == "call_parallel" and "calls" in data:
-                    for call_data in data["calls"]:
+            # Try parsing, then repair and retry
+            for attempt in range(2):
+                try:
+                    data = json.loads(json_str)
+                    action = data.get("action", "fail")
+                    reasoning = data.get("reasoning", "")
+                    
+                    # Parse calls
+                    calls = []
+                    if action == "call_parallel" and "calls" in data:
+                        for call_data in data["calls"]:
+                            calls.append(WorkerCall(
+                                worker_name=call_data.get("worker", ""),
+                                instructions=call_data.get("instructions", ""),
+                                inputs=call_data.get("inputs", {})
+                            ))
+                    elif action == "call" and "worker" in data:
                         calls.append(WorkerCall(
-                            worker_name=call_data.get("worker", ""),
-                            instructions=call_data.get("instructions", ""),
-                            inputs=call_data.get("inputs", {})
+                            worker_name=data.get("worker", ""),
+                            instructions=data.get("instructions", ""),
+                            inputs=data.get("inputs", {})
                         ))
-                elif action == "call" and "worker" in data:
-                    calls.append(WorkerCall(
-                        worker_name=data.get("worker", ""),
-                        instructions=data.get("instructions", ""),
-                        inputs=data.get("inputs", {})
-                    ))
-                
-                return SupervisorDecision(
-                    action=action,
-                    calls=calls,
-                    reasoning=reasoning
-                )
-            except json.JSONDecodeError:
+                    
+                    return SupervisorDecision(
+                        action=action,
+                        calls=calls,
+                        reasoning=reasoning
+                    )
+                except json.JSONDecodeError:
+                    if attempt == 0:
+                        # Try repair on first failure
+                        json_str = repair_json(json_str)
+                    else:
+                        pass  # Give up after repair attempt
                 pass
         
         # Fallback parsing for non-JSON responses
