@@ -5,13 +5,19 @@ The "Prefrontal Cortex" of the blackboard system.
 An LLM-driven supervisor that manages worker execution based on state.
 """
 
+import asyncio
 import json
+import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable, Awaitable, Union
 
 from .state import Blackboard, Status, Artifact, Feedback
 from .protocols import Worker, WorkerOutput, WorkerRegistry
+
+
+# Configure module logger
+logger = logging.getLogger("blackboard")
 
 
 @runtime_checkable
@@ -20,22 +26,23 @@ class LLMClient(Protocol):
     Protocol for LLM providers.
     
     Any class with a `generate(prompt: str) -> str` method works.
+    Supports both sync and async implementations.
     
     Examples:
-        # OpenAI-style client
+        # OpenAI-style client (sync)
         class OpenAIClient:
             def generate(self, prompt: str) -> str:
                 response = openai.chat.completions.create(...)
                 return response.choices[0].message.content
         
-        # Anthropic-style client
+        # Anthropic-style client (async)
         class AnthropicClient:
-            def generate(self, prompt: str) -> str:
-                response = anthropic.messages.create(...)
+            async def generate(self, prompt: str) -> str:
+                response = await anthropic.messages.create(...)
                 return response.content[0].text
     """
     
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str) -> Union[str, Awaitable[str]]:
         """Generate a response for the given prompt."""
         ...
 
@@ -72,10 +79,14 @@ class Orchestrator:
         workers = [TextWriter(), TextReviewer()]
         orchestrator = Orchestrator(llm=llm, workers=workers)
         
-        result = orchestrator.run(
+        # Async usage
+        result = await orchestrator.run(
             goal="Write a haiku about coding",
             max_steps=10
         )
+        
+        # Sync convenience
+        result = orchestrator.run_sync(goal="...", max_steps=10)
     """
     
     SUPERVISOR_SYSTEM_PROMPT = '''You are a Supervisor managing a team of AI workers to accomplish a goal.
@@ -123,9 +134,9 @@ Actions:
         Initialize the orchestrator.
         
         Args:
-            llm: An LLM client with a generate() method
+            llm: An LLM client with a generate() method (sync or async)
             workers: List of workers to manage
-            verbose: If True, print debug information
+            verbose: If True, enable INFO level logging
             on_step: Optional callback called after each step
         """
         self.llm = llm
@@ -134,10 +145,17 @@ Actions:
             self.registry.register(worker)
         self.verbose = verbose
         self.on_step = on_step
+        
+        # Configure logging based on verbose flag
+        if verbose and not logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter('[%(name)s] %(message)s'))
+            logger.addHandler(handler)
+            logger.setLevel(logging.DEBUG)
 
-    def run(self, goal: str, max_steps: int = 20) -> Blackboard:
+    async def run(self, goal: str, max_steps: int = 20) -> Blackboard:
         """
-        Execute the main orchestration loop.
+        Execute the main orchestration loop (async).
         
         Args:
             goal: The objective to accomplish
@@ -149,26 +167,23 @@ Actions:
         # Initialize the blackboard
         state = Blackboard(goal=goal, status=Status.PLANNING)
         
-        if self.verbose:
-            print(f" Goal: {goal}")
-            print(f" Workers: {list(self.registry.list_workers().keys())}")
-            print("-" * 50)
+        logger.info(f"Goal: {goal}")
+        logger.info(f"Workers: {list(self.registry.list_workers().keys())}")
+        logger.debug("-" * 50)
         
         for step in range(max_steps):
             state.increment_step()
             
-            if self.verbose:
-                print(f"\n📍 Step {state.step_count}")
+            logger.debug(f"Step {state.step_count}")
             
             # 1. OBSERVE: Build context
             context = state.to_context_string()
             
             # 2. REASON: Ask LLM for next action
-            decision = self._get_supervisor_decision(context)
+            decision = await self._get_supervisor_decision(context)
             
-            if self.verbose:
-                print(f" Decision: {decision.action} -> {decision.worker_name}")
-                print(f" Reasoning: {decision.reasoning}")
+            logger.debug(f"Decision: {decision.action} -> {decision.worker_name}")
+            logger.debug(f"Reasoning: {decision.reasoning}")
             
             # Call step callback if provided
             if self.on_step:
@@ -177,14 +192,12 @@ Actions:
             # 3. CHECK: Handle terminal actions
             if decision.action == "done":
                 state.update_status(Status.DONE)
-                if self.verbose:
-                    print(" Goal achieved!")
+                logger.info("Goal achieved!")
                 break
             
             if decision.action == "fail":
                 state.update_status(Status.FAILED)
-                if self.verbose:
-                    print(" Goal failed")
+                logger.warning("Goal failed")
                 break
             
             # 4. ACT: Execute the worker
@@ -192,8 +205,7 @@ Actions:
                 worker = self.registry.get(decision.worker_name)
                 
                 if worker is None:
-                    if self.verbose:
-                        print(f" Worker '{decision.worker_name}' not found")
+                    logger.warning(f"Worker '{decision.worker_name}' not found")
                     continue
                 
                 # Update status based on worker type (heuristic)
@@ -208,17 +220,16 @@ Actions:
                 state.metadata["current_instructions"] = decision.instructions
                 
                 try:
-                    output = worker.run(state)
+                    output = await worker.run(state)
                     self._apply_worker_output(state, output, worker.name)
                     
-                    if self.verbose and output.has_artifact():
-                        print(f"    Artifact: {output.artifact.type}")
-                    if self.verbose and output.has_feedback():
-                        print(f"    Feedback: passed={output.feedback.passed}")
+                    if output.has_artifact():
+                        logger.debug(f"Artifact: {output.artifact.type}")
+                    if output.has_feedback():
+                        logger.debug(f"Feedback: passed={output.feedback.passed}")
                         
                 except Exception as e:
-                    if self.verbose:
-                        print(f"    Worker error: {e}")
+                    logger.error(f"Worker error: {e}")
                     state.add_feedback(Feedback(
                         source="Orchestrator",
                         critique=f"Worker '{decision.worker_name}' failed: {str(e)}",
@@ -228,12 +239,26 @@ Actions:
             # Max steps reached without completion
             if state.status not in (Status.DONE, Status.FAILED):
                 state.update_status(Status.FAILED)
-                if self.verbose:
-                    print(f"⏱  Max steps ({max_steps}) reached")
+                logger.warning(f"Max steps ({max_steps}) reached")
         
         return state
 
-    def _get_supervisor_decision(self, context: str) -> SupervisorDecision:
+    def run_sync(self, goal: str, max_steps: int = 20) -> Blackboard:
+        """
+        Synchronous wrapper for run().
+        
+        Convenience method for non-async contexts.
+        
+        Args:
+            goal: The objective to accomplish
+            max_steps: Maximum number of steps before stopping
+            
+        Returns:
+            The final blackboard state
+        """
+        return asyncio.run(self.run(goal=goal, max_steps=max_steps))
+
+    async def _get_supervisor_decision(self, context: str) -> SupervisorDecision:
         """Ask the LLM supervisor what to do next."""
         # Build the worker list for the system prompt
         worker_list = "\n".join([
@@ -246,11 +271,15 @@ Actions:
         full_prompt = f"{system_prompt}\n\n## Current State\n{context}\n\n## Your Decision (JSON only):"
         
         try:
-            response = self.llm.generate(full_prompt)
+            # Support both sync and async LLM clients
+            result = self.llm.generate(full_prompt)
+            if asyncio.iscoroutine(result):
+                response = await result
+            else:
+                response = result
             return self._parse_llm_response(response)
         except Exception as e:
-            if self.verbose:
-                print(f"LLM error: {e}")
+            logger.error(f"LLM error: {e}")
             # Fallback: try to continue sensibly
             return SupervisorDecision(
                 action="fail",
@@ -308,7 +337,7 @@ Actions:
 
 
 # Convenience function for simple use cases
-def run_blackboard(
+async def run_blackboard(
     goal: str,
     llm: LLMClient,
     workers: List[Worker],
@@ -316,17 +345,40 @@ def run_blackboard(
     verbose: bool = False
 ) -> Blackboard:
     """
-    Convenience function to run the blackboard system.
+    Convenience function to run the blackboard system (async).
     
     Args:
         goal: The objective to accomplish
         llm: An LLM client
         workers: List of workers
         max_steps: Maximum iterations
-        verbose: Print debug output
+        verbose: Enable debug logging
         
     Returns:
         Final blackboard state
     """
     orchestrator = Orchestrator(llm=llm, workers=workers, verbose=verbose)
-    return orchestrator.run(goal=goal, max_steps=max_steps)
+    return await orchestrator.run(goal=goal, max_steps=max_steps)
+
+
+def run_blackboard_sync(
+    goal: str,
+    llm: LLMClient,
+    workers: List[Worker],
+    max_steps: int = 20,
+    verbose: bool = False
+) -> Blackboard:
+    """
+    Convenience function to run the blackboard system (sync).
+    
+    Args:
+        goal: The objective to accomplish
+        llm: An LLM client
+        workers: List of workers
+        max_steps: Maximum iterations
+        verbose: Enable debug logging
+        
+    Returns:
+        Final blackboard state
+    """
+    return asyncio.run(run_blackboard(goal, llm, workers, max_steps, verbose))

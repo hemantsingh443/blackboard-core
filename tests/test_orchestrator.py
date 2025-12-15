@@ -31,7 +31,7 @@ class SimpleWriter(Worker):
     name = "Writer"
     description = "Writes text content"
     
-    def run(self, state: Blackboard) -> WorkerOutput:
+    async def run(self, state: Blackboard) -> WorkerOutput:
         instructions = state.metadata.get("current_instructions", "")
         content = f"Generated content: {instructions}" if instructions else "Default content"
         return WorkerOutput(
@@ -47,7 +47,7 @@ class SimpleReviewer(Worker):
     def __init__(self, should_pass: bool = True):
         self.should_pass = should_pass
     
-    def run(self, state: Blackboard) -> WorkerOutput:
+    async def run(self, state: Blackboard) -> WorkerOutput:
         last_artifact = state.get_last_artifact()
         return WorkerOutput(
             feedback=Feedback(
@@ -72,7 +72,8 @@ class TestOrchestrator:
         assert "Writer" in orch.registry
         assert "Reviewer" in orch.registry
     
-    def test_simple_success_flow(self):
+    @pytest.mark.asyncio
+    async def test_simple_success_flow(self):
         """Test a simple successful write -> review -> done flow."""
         llm = MockLLM([
             '{"action": "call", "worker": "Writer", "instructions": "Write hello", "reasoning": "Start"}',
@@ -85,14 +86,15 @@ class TestOrchestrator:
             workers=[SimpleWriter(), SimpleReviewer(should_pass=True)]
         )
         
-        result = orch.run(goal="Write a greeting", max_steps=5)
+        result = await orch.run(goal="Write a greeting", max_steps=5)
         
         assert result.status == Status.DONE
         assert len(result.artifacts) == 1
         assert len(result.feedback) == 1
         assert result.feedback[0].passed is True
     
-    def test_retry_on_failure(self):
+    @pytest.mark.asyncio
+    async def test_retry_on_failure(self):
         """Test that the orchestrator handles worker failures."""
         llm = MockLLM([
             '{"action": "call", "worker": "Writer", "instructions": "First try"}',
@@ -107,12 +109,13 @@ class TestOrchestrator:
             workers=[SimpleWriter(), SimpleReviewer(should_pass=False)]
         )
         
-        result = orch.run(goal="Write something good", max_steps=5)
+        result = await orch.run(goal="Write something good", max_steps=5)
         
         # Should have 2 artifacts (first try + retry)
         assert len(result.artifacts) == 2
     
-    def test_max_steps_reached(self):
+    @pytest.mark.asyncio
+    async def test_max_steps_reached(self):
         """Test that orchestrator stops at max steps."""
         llm = MockLLM([
             '{"action": "call", "worker": "Writer", "instructions": "Write"}',
@@ -121,12 +124,13 @@ class TestOrchestrator:
         ])
         
         orch = Orchestrator(llm=llm, workers=[SimpleWriter()])
-        result = orch.run(goal="Test", max_steps=3)
+        result = await orch.run(goal="Test", max_steps=3)
         
         assert result.status == Status.FAILED
         assert result.step_count == 3
     
-    def test_unknown_worker(self):
+    @pytest.mark.asyncio
+    async def test_unknown_worker(self):
         """Test handling of unknown worker names."""
         llm = MockLLM([
             '{"action": "call", "worker": "NonExistent", "instructions": "Do something"}',
@@ -134,12 +138,13 @@ class TestOrchestrator:
         ])
         
         orch = Orchestrator(llm=llm, workers=[SimpleWriter()])
-        result = orch.run(goal="Test", max_steps=3)
+        result = await orch.run(goal="Test", max_steps=3)
         
         # Should continue despite unknown worker
         assert result.status == Status.DONE
     
-    def test_step_callback(self):
+    @pytest.mark.asyncio
+    async def test_step_callback(self):
         """Test that step callback is called."""
         llm = MockLLM([
             '{"action": "call", "worker": "Writer", "instructions": "Write"}',
@@ -157,11 +162,20 @@ class TestOrchestrator:
             on_step=on_step
         )
         
-        orch.run(goal="Test", max_steps=5)
+        await orch.run(goal="Test", max_steps=5)
         
         assert len(steps_seen) == 2
         assert steps_seen[0][1] == "call"
         assert steps_seen[1][1] == "done"
+    
+    def test_run_sync(self):
+        """Test the synchronous wrapper."""
+        llm = MockLLM(['{"action": "done", "reasoning": "Quick"}'])
+        orch = Orchestrator(llm=llm, workers=[SimpleWriter()])
+        
+        # Use sync wrapper
+        result = orch.run_sync(goal="Quick test", max_steps=1)
+        assert result.status == Status.DONE
 
 
 class TestLLMProtocol:
@@ -174,7 +188,8 @@ class TestLLMProtocol:
         llm = MockLLM(['{"action": "done"}'])
         assert isinstance(llm, LLMClient)
     
-    def test_callable_as_llm(self):
+    @pytest.mark.asyncio
+    async def test_callable_as_llm(self):
         """Test using a simple class as LLM client."""
         
         class SimpleLLM:
@@ -182,6 +197,6 @@ class TestLLMProtocol:
                 return '{"action": "done", "reasoning": "Simple"}'
         
         orch = Orchestrator(llm=SimpleLLM(), workers=[SimpleWriter()])
-        result = orch.run(goal="Quick test", max_steps=1)
+        result = await orch.run(goal="Quick test", max_steps=1)
         
         assert result.status == Status.DONE

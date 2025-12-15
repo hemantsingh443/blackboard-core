@@ -68,7 +68,7 @@ class Worker(ABC):
             name = "Writer"
             description = "Generates text content based on the goal"
             
-            def run(self, state: Blackboard) -> WorkerOutput:
+            async def run(self, state: Blackboard) -> WorkerOutput:
                 # Generate content based on state.goal
                 content = f"Generated content for: {state.goal}"
                 return WorkerOutput(
@@ -81,7 +81,7 @@ class Worker(ABC):
     description: str = "A worker in the blackboard system"
     
     @abstractmethod
-    def run(self, state: "Blackboard") -> WorkerOutput:
+    async def run(self, state: "Blackboard") -> WorkerOutput:
         """
         Execute the worker's logic and return the result.
         

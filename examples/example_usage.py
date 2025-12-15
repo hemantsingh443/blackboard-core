@@ -6,8 +6,10 @@ This example demonstrates the self-healing loop pattern:
 2. Reviewer checks it
 3. If rejected, Writer tries again with feedback
 4. Loop continues until approved or max_steps reached
-
 """
+
+import asyncio
+import logging
 
 from blackboard import (
     Orchestrator, Worker, WorkerOutput,
@@ -23,7 +25,7 @@ class MockLLMClient:
     """
     A mock LLM that simulates supervisor decisions.
     
-    In production, replace with:
+    In production, replace with a real LLM client:
         class OpenAIClient:
             def __init__(self, api_key: str):
                 self.client = openai.OpenAI(api_key=api_key)
@@ -77,7 +79,7 @@ class HaikuWriter(Worker):
     def __init__(self):
         self.attempt = 0
     
-    def run(self, state: Blackboard) -> WorkerOutput:
+    async def run(self, state: Blackboard) -> WorkerOutput:
         self.attempt += 1
         instructions = state.metadata.get("current_instructions", "")
         
@@ -117,7 +119,7 @@ class HaikuReviewer(Worker):
         self.reviews_done = 0
         self.pass_on_attempt = pass_on_attempt
     
-    def run(self, state: Blackboard) -> WorkerOutput:
+    async def run(self, state: Blackboard) -> WorkerOutput:
         self.reviews_done += 1
         last_artifact = state.get_last_artifact()
         
@@ -142,7 +144,7 @@ class HaikuReviewer(Worker):
                 )
             )
         else:
-            print(f"  ❌ Reviewer: Needs revision")
+            print(f"   Reviewer: Needs revision")
             return WorkerOutput(
                 feedback=Feedback(
                     source=self.name,
@@ -157,10 +159,13 @@ class HaikuReviewer(Worker):
 # Main Execution
 # =============================================================================
 
-def main():
+async def main():
     print("=" * 60)
     print("Blackboard-Core Example: Haiku Writer/Reviewer")
     print("=" * 60)
+    
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format='[%(name)s] %(message)s')
     
     # Initialize components
     llm = MockLLMClient()
@@ -176,8 +181,8 @@ def main():
         verbose=True
     )
     
-    # Run the loop
-    result = orchestrator.run(
+    # Run the loop (async)
+    result = await orchestrator.run(
         goal="Write a haiku about programming",
         max_steps=10
     )
@@ -199,9 +204,9 @@ def main():
     
     if result.feedback:
         final_feedback = result.feedback[-1]
-        print(f"\n Final Review: {' Passed' if final_feedback.passed else '❌ Failed'}")
+        print(f"\n Final Review: {' Passed' if final_feedback.passed else ' Failed'}")
         print(f"   {final_feedback.critique}")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

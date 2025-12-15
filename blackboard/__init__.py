@@ -21,7 +21,7 @@ Quick Start:
 
 from .state import Artifact, Feedback, Blackboard, Status
 from .protocols import Worker, WorkerOutput, WorkerRegistry
-from .core import Orchestrator, LLMClient, SupervisorDecision, run_blackboard
+from .core import Orchestrator, LLMClient, SupervisorDecision, run_blackboard, run_blackboard_sync
 
 __version__ = "0.1.0"
 
@@ -40,4 +40,5 @@ __all__ = [
     "LLMClient",
     "SupervisorDecision",
     "run_blackboard",
+    "run_blackboard_sync",
 ]
