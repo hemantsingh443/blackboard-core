@@ -107,7 +107,7 @@ class Worker(ABC):
     name: str = "UnnamedWorker"
     description: str = "A worker in the blackboard system"
     input_schema: Optional[Type[WorkerInput]] = None  # Optional structured input
-    parallel_safe: bool = True  # Can run in parallel with other workers
+    parallel_safe: bool = False  # Set True only for read-only/stateless workers
     
     @abstractmethod
     async def run(

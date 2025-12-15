@@ -192,7 +192,7 @@ class TestParallelExecution:
         class ResearcherA(Worker):
             name = "ResearcherA"
             description = "Researches topic A"
-            parallel_safe = True
+            parallel_safe = True  # Opt-in to parallel execution
             
             async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
                 return WorkerOutput(
@@ -202,7 +202,7 @@ class TestParallelExecution:
         class ResearcherB(Worker):
             name = "ResearcherB"
             description = "Researches topic B"
-            parallel_safe = True
+            parallel_safe = True  # Opt-in to parallel execution
             
             async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
                 return WorkerOutput(
@@ -210,7 +210,7 @@ class TestParallelExecution:
                 )
         
         llm = MockLLM([
-            '{"action": "call_parallel", "calls": [{"worker": "ResearcherA", "instructions": "Research A"}, {"worker": "ResearcherB", "instructions": "Research B"}], "reasoning": "Independent tasks"}',
+            '{"action": "call_independent", "calls": [{"worker": "ResearcherA", "instructions": "Research A"}, {"worker": "ResearcherB", "instructions": "Research B"}], "reasoning": "Independent tasks"}',
             '{"action": "done", "reasoning": "Both done"}'
         ])
         

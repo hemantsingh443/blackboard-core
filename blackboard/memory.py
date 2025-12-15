@@ -109,6 +109,11 @@ class SimpleVectorMemory(Memory):
     """
     A simple in-memory vector store using cosine similarity.
     
+    .. warning::
+        **Development/Testing Only**: Uses O(N) linear search.
+        For production with >10k entries, use a dedicated vector DB
+        (FAISS, Chroma, pgvector) via a custom Memory implementation.
+    
     Accepts any EmbeddingModel implementation for flexibility:
     - TFIDFEmbedder (default): Lightweight, no dependencies
     - LocalEmbedder: High quality, uses sentence-transformers
@@ -288,18 +293,8 @@ class MemoryWorker(Worker):
         if inputs is None:
             inputs = MemoryInput()
         
-        # Determine operation from inputs or instructions
+        # Operation must be explicitly set - no heuristic guessing
         operation = inputs.operation
-        
-        # Parse operation from instructions if not explicit
-        if inputs.instructions:
-            instr_lower = inputs.instructions.lower()
-            if "remember" in instr_lower or "store" in instr_lower or "save" in instr_lower:
-                operation = "add"
-            elif "forget" in instr_lower or "delete" in instr_lower:
-                operation = "delete"
-            else:
-                operation = "search"
         
         if operation == "search":
             query = inputs.query or inputs.instructions

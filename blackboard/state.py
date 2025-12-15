@@ -20,6 +20,7 @@ class Status(str, Enum):
     GENERATING = "generating"
     CRITIQUING = "critiquing"
     REFINING = "refining"
+    PAUSED = "paused"  # For pause-and-resume pattern (e.g., awaiting approval)
     DONE = "done"
     FAILED = "failed"
 
@@ -79,6 +80,7 @@ class Blackboard(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Extensible context")
     step_count: int = Field(default=0, description="Number of steps executed")
     history: List[Dict[str, Any]] = Field(default_factory=list, description="Execution history log")
+    max_history: int = Field(default=1000, description="Max history entries (ring buffer, prevents OOM)")
     context_summary: str = Field(default="", description="Summary of earlier context (for long sessions)")
 
     model_config = {"extra": "allow"}
@@ -197,13 +199,16 @@ class Blackboard(BaseModel):
         return self.step_count
 
     def _log_event(self, event_type: str, data: Dict[str, Any]) -> None:
-        """Add an event to the execution history."""
+        """Add an event to the execution history (ring buffer)."""
         self.history.append({
             "event": event_type,
             "data": data,
             "timestamp": datetime.now().isoformat(),
             "step": self.step_count
         })
+        # Ring buffer: drop oldest entries if exceeding max
+        if len(self.history) > self.max_history:
+            self.history = self.history[-self.max_history:]
 
     # =========================================================================
     # Context Generation (with history management)

@@ -79,14 +79,19 @@ class SupervisorDecision:
     """
     The parsed decision from the supervisor LLM.
     
-    Supports both single and parallel worker calls.
+    Supports both single and independent parallel worker calls.
     
     Attributes:
-        action: The action to take ("call", "call_parallel", "done", "fail")
+        action: The action to take ("call", "call_independent", "done", "fail")
         calls: List of worker calls (supports parallel execution)
         reasoning: The supervisor's reasoning for this decision
+        
+    Note:
+        For "call_independent", workers read state at call time. Their outputs
+        are applied sequentially after all complete - later workers will NOT
+        see earlier workers' results within the same call_independent batch.
     """
-    action: str  # "call", "call_parallel", "done", "fail"
+    action: str  # "call", "call_independent", "done", "fail"
     calls: List[WorkerCall] = field(default_factory=list)
     reasoning: str = ""
     
@@ -156,11 +161,13 @@ You MUST respond with valid JSON in one of these formats:
 }}
 ```
 
-### Parallel Worker Calls (for independent tasks)
+### Independent Worker Calls (parallel, NO dependencies)
+IMPORTANT: Only use this when tasks do NOT depend on each other's outputs.
+Each worker reads state at call time - workers will NOT see other workers' results from this batch.
 ```json
 {{
-    "reasoning": "These tasks are independent and can run in parallel",
-    "action": "call_parallel",
+    "reasoning": "These tasks are fully independent - no worker needs another's output",
+    "action": "call_independent",
     "calls": [
         {{"worker": "Worker1", "instructions": "Task 1"}},
         {{"worker": "Worker2", "instructions": "Task 2"}}
@@ -179,7 +186,7 @@ You MUST respond with valid JSON in one of these formats:
 2. If there's an artifact but no feedback, call a Critic/Reviewer worker
 3. If feedback says "passed: false", call the Generator again with the critique
 4. If feedback says "passed: true", mark as "done"
-5. Use "call_parallel" when tasks are independent (e.g., researching multiple topics)
+5. Use "call_independent" ONLY for truly independent tasks (e.g., researching separate topics)
 6. Don't call the same worker twice in a row without new information
 '''
 
@@ -196,6 +203,7 @@ You MUST respond with valid JSON in one of these formats:
         middleware: Optional[List[Middleware]] = None,
         usage_tracker: Optional[UsageTracker] = None,
         use_tool_calling: bool = True,
+        allow_json_fallback: bool = True,
         auto_summarize: bool = False,
         summarize_thresholds: Optional[Dict[str, int]] = None
     ):
@@ -214,6 +222,7 @@ You MUST respond with valid JSON in one of these formats:
             middleware: List of middleware to add to the stack
             usage_tracker: Tracker for LLM token usage and costs
             use_tool_calling: If True, use native tool calling when LLM supports it
+            allow_json_fallback: If False, raise error when tool calling fails instead of silently falling back
             auto_summarize: If True, automatically summarize context when thresholds exceeded
             summarize_thresholds: Custom thresholds for summarization
         """
@@ -229,6 +238,7 @@ You MUST respond with valid JSON in one of these formats:
         self.enable_parallel = enable_parallel
         self.usage_tracker = usage_tracker
         self.use_tool_calling = use_tool_calling
+        self.allow_json_fallback = allow_json_fallback
         self.auto_summarize = auto_summarize
         self.summarize_thresholds = summarize_thresholds or {
             "artifacts": 10,
@@ -360,8 +370,8 @@ You MUST respond with valid JSON in one of these formats:
             if decision.action == "call" and decision.calls:
                 # Single worker call
                 await self._execute_worker(state, decision.calls[0])
-            elif decision.action == "call_parallel" and decision.calls:
-                # Parallel worker calls
+            elif decision.action == "call_independent" and decision.calls:
+                # Independent parallel worker calls (stale read warning: each sees state at T0)
                 await self._execute_workers_parallel(state, decision.calls)
             
             # After step middleware hook
@@ -437,6 +447,20 @@ You MUST respond with valid JSON in one of these formats:
         # Apply results to state (sequentially to maintain consistency)
         for call, result in zip(safe_calls, results):
             if isinstance(result, Exception):
+                # Check if this might be a dependency failure (stale read issue)
+                if self._is_potential_dependency_error(result):
+                    logger.warning(
+                        f"Possible stale read issue for '{call.worker_name}', "
+                        f"retrying sequentially: {result}"
+                    )
+                    # Retry this worker sequentially with updated state
+                    try:
+                        await self._execute_worker(state, call)
+                        continue  # Success - don't add error feedback
+                    except Exception as retry_error:
+                        logger.error(f"Sequential retry also failed: {retry_error}")
+                        result = retry_error  # Fall through to error handling
+                
                 logger.error(f"Parallel worker error: {result}")
                 state.add_feedback(Feedback(
                     source="Orchestrator",
@@ -724,7 +748,7 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
                             ))
                 
                 if calls:
-                    action = "call_parallel" if len(calls) > 1 else "call"
+                    action = "call_independent" if len(calls) > 1 else "call"
                     return SupervisorDecision(action=action, calls=calls, reasoning="Via tool calling")
             
             # String response - fall back to JSON parsing
@@ -734,8 +758,13 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
             return SupervisorDecision(action="fail", reasoning="Unexpected response format")
             
         except Exception as e:
-            logger.warning(f"Tool calling failed, falling back to JSON: {e}")
-            return await self._get_decision_via_json(context, state)
+            if self.allow_json_fallback:
+                logger.warning(f"Tool calling failed, falling back to JSON: {e}")
+                return await self._get_decision_via_json(context, state)
+            else:
+                raise RuntimeError(
+                    f"Tool calling failed and allow_json_fallback=False: {e}"
+                ) from e
     
     async def _get_decision_via_json(self, context: str, state: Blackboard) -> SupervisorDecision:
         """Get decision using JSON-based prompting."""
@@ -843,7 +872,9 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
                     
                     # Parse calls
                     calls = []
-                    if action == "call_parallel" and "calls" in data:
+                    if action in ("call_parallel", "call_independent") and "calls" in data:
+                        # Support both for backward compatibility
+                        action = "call_independent"  # Normalize to new name
                         for call_data in data["calls"]:
                             calls.append(WorkerCall(
                                 worker_name=call_data.get("worker", ""),
@@ -903,6 +934,42 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         """Publish an event to the event bus."""
         event = Event(type=event_type, data=data)
         await self.event_bus.publish_async(event)
+
+    def _is_potential_dependency_error(self, error: Exception) -> bool:
+        """
+        Check if an error likely indicates a stale read / dependency issue.
+        
+        These errors often occur when a parallel worker tries to access
+        state that another worker was supposed to create but hasn't yet
+        (because they ran in parallel with stale state).
+        
+        Returns:
+            True if the error pattern suggests a dependency issue
+        """
+        # Common dependency-related exceptions
+        dependency_exceptions = (
+            FileNotFoundError,
+            KeyError,
+            AttributeError,
+            IndexError,
+        )
+        
+        if isinstance(error, dependency_exceptions):
+            return True
+        
+        # Check error message patterns
+        error_str = str(error).lower()
+        dependency_patterns = [
+            "not found",
+            "does not exist",
+            "missing",
+            "no such file",
+            "undefined",
+            "null",
+            "none",
+        ]
+        
+        return any(pattern in error_str for pattern in dependency_patterns)
 
 
 # Convenience functions

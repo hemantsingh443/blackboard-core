@@ -211,16 +211,16 @@ class TestMemoryWorker:
         assert len(memory.get_all()) == 1
     
     @pytest.mark.asyncio
-    async def test_memory_instruction_parsing(self):
-        """Test that instructions are parsed for operation."""
+    async def test_memory_explicit_operation(self):
+        """Test that operation must be explicitly specified."""
         memory = SimpleVectorMemory()
         memory.add("Some existing data")
         
         worker = MemoryWorker(memory)
         state = Blackboard(goal="Test")
         
-        # "remember" should trigger add
-        inputs = MemoryInput(instructions="Remember that user likes blue")
+        # Explicit operation='add' required (no heuristic parsing)
+        inputs = MemoryInput(operation="add", content="User likes blue")
         output = await worker.run(state, inputs)
         
         assert len(memory.get_all()) == 2  # Original + new

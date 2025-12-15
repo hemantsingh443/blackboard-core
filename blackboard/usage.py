@@ -235,9 +235,11 @@ class UsageTracker:
 
 
 # =============================================================================
-# Pricing Constants (as of Dec 2024, for reference)
+# Pricing Constants (DEPRECATED - as of Dec 2024, for reference only)
 # =============================================================================
 
+# DEPRECATED: LLM prices change frequently. Pass your own pricing config
+# to UsageTracker(model_costs={...}) for accurate cost tracking.
 MODEL_PRICING = {
     # OpenAI
     "gpt-4o": {"input": 0.0025, "output": 0.01},
@@ -252,6 +254,34 @@ MODEL_PRICING = {
 }
 
 
-def create_openai_tracker() -> UsageTracker:
-    """Create a tracker pre-configured with OpenAI pricing."""
-    return UsageTracker(model_costs=MODEL_PRICING)
+def create_openai_tracker(
+    pricing_config: Optional[Dict[str, Dict[str, float]]] = None
+) -> UsageTracker:
+    """
+    Create a tracker pre-configured with OpenAI pricing.
+    
+    Args:
+        pricing_config: Optional custom pricing dict. If not provided,
+            uses built-in MODEL_PRICING (which may be outdated).
+            
+    Returns:
+        Configured UsageTracker instance
+        
+    Example:
+        # With custom/current pricing
+        tracker = create_openai_tracker({
+            "gpt-4o": {"input": 0.0025, "output": 0.01}
+        })
+    """
+    import warnings
+    
+    if pricing_config is None:
+        warnings.warn(
+            "Using built-in MODEL_PRICING which may be outdated. "
+            "Consider providing your own pricing_config for accurate cost tracking.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        pricing_config = MODEL_PRICING
+    
+    return UsageTracker(model_costs=pricing_config)

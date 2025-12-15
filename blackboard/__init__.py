@@ -33,7 +33,8 @@ from .events import EventBus, Event, EventType, get_event_bus, reset_event_bus
 from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, NO_RETRY, is_transient_error
 from .middleware import (
     Middleware, MiddlewareStack, StepContext, WorkerContext,
-    BudgetMiddleware, LoggingMiddleware, HumanApprovalMiddleware, AutoSummarizationMiddleware
+    BudgetMiddleware, LoggingMiddleware, HumanApprovalMiddleware, AutoSummarizationMiddleware,
+    ApprovalRequired
 )
 from .usage import LLMResponse, LLMUsage, UsageTracker, UsageRecord, MODEL_PRICING, create_openai_tracker
 from .tools import (
@@ -94,6 +95,7 @@ __all__ = [
     "LoggingMiddleware",
     "HumanApprovalMiddleware",
     "AutoSummarizationMiddleware",
+    "ApprovalRequired",
     # Usage Tracking
     "UsageTracker",
     "UsageRecord",

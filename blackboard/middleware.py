@@ -196,15 +196,25 @@ class BudgetMiddleware(Middleware):
         
         # Check limits
         if self.max_tokens and self.total_tokens > self.max_tokens:
-            from .state import Status
+            from .state import Status, Feedback
             ctx.state.update_status(Status.FAILED)
             ctx.state.metadata["failure_reason"] = "Token budget exceeded"
+            ctx.state.add_feedback(Feedback(
+                source="System:BudgetMiddleware",
+                critique="Action blocked: Token budget exceeded. No further actions will be processed.",
+                passed=False
+            ))
             ctx.skip_step = True
         
         if self.max_cost and self.total_cost > self.max_cost:
-            from .state import Status
+            from .state import Status, Feedback
             ctx.state.update_status(Status.FAILED)
             ctx.state.metadata["failure_reason"] = "Cost budget exceeded"
+            ctx.state.add_feedback(Feedback(
+                source="System:BudgetMiddleware",
+                critique="Action blocked: Cost budget exceeded. No further actions will be processed.",
+                passed=False
+            ))
             ctx.skip_step = True
 
 
@@ -235,14 +245,45 @@ class LoggingMiddleware(Middleware):
         self.logger.error(f"[Worker] {ctx.worker.name} failed: {ctx.error}")
 
 
+class ApprovalRequired(Exception):
+    """
+    Raised when human approval is required before proceeding.
+    
+    Catch this exception to implement custom approval flows:
+    - Web: Save state, return 202 Accepted, await webhook callback
+    - CLI: Prompt user and call orchestrator.resume()
+    - Async: Check database flag, retry later
+    
+    Example:
+        try:
+            result = await orchestrator.run(goal="Deploy to prod")
+        except ApprovalRequired as e:
+            # Save state for later resume
+            orchestrator.state.save_to_json("pending_approval.json")
+            notify_admin(e.worker_name, e.instructions)
+    """
+    def __init__(self, worker_name: str, instructions: str):
+        self.worker_name = worker_name
+        self.instructions = instructions
+        super().__init__(f"Approval required for worker '{worker_name}'")
+
+
 class HumanApprovalMiddleware(Middleware):
     """
     Requires human approval before executing certain workers.
     
-    Example:
+    .. warning::
+        Default callback raises ApprovalRequired exception.
+        For server deployments, provide an async-compatible callback
+        or catch the exception to implement pause-and-resume.
+    
+    Example (async callback):
+        async def check_approval_db(worker, instructions):
+            return await db.check_approval_flag(worker)
+        
         approval = HumanApprovalMiddleware(
-            require_approval_for=["Deployer", "DataDeleter"],
-            approval_callback=lambda w, i: input(f"Approve {w}? (y/n): ") == "y"
+            require_approval_for=["Deployer"],
+            approval_callback=check_approval_db
         )
     """
     
@@ -257,20 +298,25 @@ class HumanApprovalMiddleware(Middleware):
         self.approval_callback = approval_callback or self._default_approval
     
     def _default_approval(self, worker_name: str, instructions: str) -> bool:
-        """Default approval via console input."""
-        print(f"\n[APPROVAL REQUIRED]")
-        print(f"Worker: {worker_name}")
-        print(f"Instructions: {instructions}")
-        response = input("Approve? (y/n): ").strip().lower()
-        return response == 'y'
+        """
+        Default: Raise exception to pause execution.
+        
+        Override with a non-blocking callback for server deployments.
+        """
+        raise ApprovalRequired(worker_name, instructions)
     
     def before_worker(self, ctx: WorkerContext) -> None:
         if ctx.worker.name in self.require_approval_for:
             approved = self.approval_callback(ctx.worker.name, ctx.call.instructions)
             if not approved:
                 ctx.skip_worker = True
-                ctx.state.metadata["skipped_workers"] = ctx.state.metadata.get("skipped_workers", [])
-                ctx.state.metadata["skipped_workers"].append(ctx.worker.name)
+                # Set status to PAUSED so LLM knows what happened
+                from .state import Status
+                ctx.state.update_status(Status.PAUSED)
+                ctx.state.metadata["paused_for"] = {
+                    "worker": ctx.worker.name,
+                    "reason": "Awaiting human approval"
+                }
 
 
 class AutoSummarizationMiddleware(Middleware):
