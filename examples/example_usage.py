@@ -10,9 +10,10 @@ This example demonstrates the self-healing loop pattern:
 
 import asyncio
 import logging
+from typing import Optional
 
 from blackboard import (
-    Orchestrator, Worker, WorkerOutput,
+    Orchestrator, Worker, WorkerOutput, WorkerInput,
     Artifact, Feedback, Blackboard, Status
 )
 
@@ -46,15 +47,15 @@ class MockLLMClient:
         self.step += 1
         
         # Decision logic based on what we see in the prompt
-        if "Latest Artifact" not in prompt:
+        if "Artifacts" not in prompt:
             # No artifact yet - call the Writer
             return '''{"reasoning": "No content yet, need to generate", "action": "call", "worker": "Writer", "instructions": "Generate a haiku about programming"}'''
         
-        if "Latest Feedback" not in prompt:
+        if "Feedback" not in prompt:
             # Have artifact but no feedback - call Reviewer
             return '''{"reasoning": "Content exists, need review", "action": "call", "worker": "Reviewer", "instructions": "Check if the haiku follows 5-7-5 syllable structure"}'''
         
-        if "passed: True" in prompt or "Passed: True" in prompt:
+        if "PASSED" in prompt:
             # Passed review - done!
             return '''{"reasoning": "Content passed review", "action": "done"}'''
         
@@ -79,9 +80,9 @@ class HaikuWriter(Worker):
     def __init__(self):
         self.attempt = 0
     
-    async def run(self, state: Blackboard) -> WorkerOutput:
+    async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
         self.attempt += 1
-        instructions = state.metadata.get("current_instructions", "")
+        instructions = inputs.instructions if inputs else state.metadata.get("current_instructions", "")
         
         # Check if there's previous feedback to incorporate
         last_feedback = state.get_latest_feedback()
@@ -119,7 +120,7 @@ class HaikuReviewer(Worker):
         self.reviews_done = 0
         self.pass_on_attempt = pass_on_attempt
     
-    async def run(self, state: Blackboard) -> WorkerOutput:
+    async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
         self.reviews_done += 1
         last_artifact = state.get_last_artifact()
         
@@ -204,8 +205,13 @@ async def main():
     
     if result.feedback:
         final_feedback = result.feedback[-1]
-        print(f"\n Final Review: {' Passed' if final_feedback.passed else ' Failed'}")
+        print(f"\n Final Review: {'Passed' if final_feedback.passed else 'Failed'}")
         print(f"   {final_feedback.critique}")
+    
+    # Demonstrate save/load
+    print("\n Saving state to 'session.json'...")
+    result.save_to_json("session.json")
+    print(" State saved! Can be resumed with Blackboard.load_from_json('session.json')")
 
 
 if __name__ == "__main__":

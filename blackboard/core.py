@@ -9,11 +9,11 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checkable, Awaitable, Union
 
 from .state import Blackboard, Status, Artifact, Feedback
-from .protocols import Worker, WorkerOutput, WorkerRegistry
+from .protocols import Worker, WorkerOutput, WorkerRegistry, WorkerInput
 from .events import EventBus, Event, EventType, get_event_bus
 from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, is_transient_error
 
@@ -50,20 +50,39 @@ class LLMClient(Protocol):
 
 
 @dataclass
+class WorkerCall:
+    """A single worker call specification."""
+    worker_name: str
+    instructions: str = ""
+    inputs: Dict[str, Any] = field(default_factory=dict)  # Structured inputs
+
+
+@dataclass
 class SupervisorDecision:
     """
     The parsed decision from the supervisor LLM.
     
+    Supports both single and parallel worker calls.
+    
     Attributes:
-        action: The action to take ("call", "done", "fail")
-        worker_name: Name of the worker to call (if action is "call")
-        instructions: Specific instructions for the worker
+        action: The action to take ("call", "call_parallel", "done", "fail")
+        calls: List of worker calls (supports parallel execution)
         reasoning: The supervisor's reasoning for this decision
     """
-    action: str  # "call", "done", "fail"
-    worker_name: Optional[str] = None
-    instructions: str = ""
+    action: str  # "call", "call_parallel", "done", "fail"
+    calls: List[WorkerCall] = field(default_factory=list)
     reasoning: str = ""
+    
+    # Backward compatibility
+    @property
+    def worker_name(self) -> Optional[str]:
+        """Get the first worker name (for backward compat)."""
+        return self.calls[0].worker_name if self.calls else None
+    
+    @property
+    def instructions(self) -> str:
+        """Get the first worker's instructions (for backward compat)."""
+        return self.calls[0].instructions if self.calls else ""
 
 
 class Orchestrator:
@@ -73,14 +92,16 @@ class Orchestrator:
     The orchestrator follows the Observe-Reason-Act loop:
     1. Observe: Read the current blackboard state
     2. Reason: Ask the LLM which worker to call next
-    3. Act: Execute the worker and update the blackboard
+    3. Act: Execute the worker(s) and update the blackboard
     4. Check: If done or failed, stop; otherwise repeat
     
     Features:
     - Async-first with sync wrapper
+    - Parallel worker execution with asyncio.gather
     - Retry mechanism with exponential backoff
     - Event bus integration for observability
     - Resume from saved state
+    - Worker input schemas
     
     Example:
         llm = MyLLMClient()
@@ -99,34 +120,50 @@ class Orchestrator:
 
 ## Your Role
 - You NEVER do the work yourself
-- You ONLY decide which worker to call next based on the current state
+- You ONLY decide which worker(s) to call next based on the current state
 - You route tasks and provide specific instructions to workers
 
 ## Available Workers
 {worker_list}
 
 ## Response Format
-You MUST respond with valid JSON in this exact format:
+You MUST respond with valid JSON in one of these formats:
+
+### Single Worker Call
 ```json
 {{
     "reasoning": "Brief explanation of why you're making this decision",
-    "action": "call" | "done" | "fail",
+    "action": "call",
     "worker": "WorkerName",
     "instructions": "Specific instructions for the worker"
 }}
 ```
 
-Actions:
-- "call": Call a worker with instructions
-- "done": The goal has been achieved (an artifact passed review)
-- "fail": The goal cannot be achieved (after multiple failures)
+### Parallel Worker Calls (for independent tasks)
+```json
+{{
+    "reasoning": "These tasks are independent and can run in parallel",
+    "action": "call_parallel",
+    "calls": [
+        {{"worker": "Worker1", "instructions": "Task 1"}},
+        {{"worker": "Worker2", "instructions": "Task 2"}}
+    ]
+}}
+```
+
+### Terminal Actions
+```json
+{{"action": "done", "reasoning": "Goal achieved"}}
+{{"action": "fail", "reasoning": "Cannot complete"}}
+```
 
 ## Rules
 1. If there's no artifact yet, call a Generator/Writer worker
 2. If there's an artifact but no feedback, call a Critic/Reviewer worker
 3. If feedback says "passed: false", call the Generator again with the critique
 4. If feedback says "passed: true", mark as "done"
-5. Don't call the same worker twice in a row without new information
+5. Use "call_parallel" when tasks are independent (e.g., researching multiple topics)
+6. Don't call the same worker twice in a row without new information
 '''
 
     def __init__(
@@ -137,7 +174,8 @@ Actions:
         on_step: Optional[Callable[[int, Blackboard, SupervisorDecision], None]] = None,
         event_bus: Optional[EventBus] = None,
         retry_policy: Optional[RetryPolicy] = None,
-        auto_save_path: Optional[str] = None
+        auto_save_path: Optional[str] = None,
+        enable_parallel: bool = True
     ):
         """
         Initialize the orchestrator.
@@ -150,6 +188,7 @@ Actions:
             event_bus: Event bus for observability (uses global if not provided)
             retry_policy: Retry policy for worker execution (default: 3 retries)
             auto_save_path: If provided, auto-save state after each step
+            enable_parallel: If True, allow parallel worker execution
         """
         self.llm = llm
         self.registry = WorkerRegistry()
@@ -160,6 +199,7 @@ Actions:
         self.event_bus = event_bus or get_event_bus()
         self.retry_policy = retry_policy or DEFAULT_RETRY_POLICY
         self.auto_save_path = auto_save_path
+        self.enable_parallel = enable_parallel
         
         # Configure logging based on verbose flag
         if verbose and not logger.handlers:
@@ -220,7 +260,7 @@ Actions:
             # 2. REASON: Ask LLM for next action
             decision = await self._get_supervisor_decision(context)
             
-            logger.debug(f"Decision: {decision.action} -> {decision.worker_name}")
+            logger.debug(f"Decision: {decision.action} -> {[c.worker_name for c in decision.calls]}")
             logger.debug(f"Reasoning: {decision.reasoning}")
             
             # Call step callback if provided
@@ -246,13 +286,18 @@ Actions:
                 })
                 break
             
-            # 4. ACT: Execute the worker
-            if decision.action == "call" and decision.worker_name:
-                await self._execute_worker(state, decision)
+            # 4. ACT: Execute worker(s)
+            if decision.action == "call" and decision.calls:
+                # Single worker call
+                await self._execute_worker(state, decision.calls[0])
+            elif decision.action == "call_parallel" and decision.calls:
+                # Parallel worker calls
+                await self._execute_workers_parallel(state, decision.calls)
             
             await self._publish_event(EventType.STEP_COMPLETED, {
                 "step": state.step_count,
-                "action": decision.action
+                "action": decision.action,
+                "workers_called": len(decision.calls)
             })
             
             # Auto-save if configured
@@ -274,12 +319,116 @@ Actions:
         
         return state
 
-    async def _execute_worker(self, state: Blackboard, decision: SupervisorDecision) -> None:
-        """Execute a worker with retry logic."""
-        worker = self.registry.get(decision.worker_name)
+    async def _execute_workers_parallel(
+        self,
+        state: Blackboard,
+        calls: List[WorkerCall]
+    ) -> List[Optional[WorkerOutput]]:
+        """Execute multiple workers in parallel using asyncio.gather."""
+        if not self.enable_parallel:
+            # Fall back to sequential execution
+            results = []
+            for call in calls:
+                await self._execute_worker(state, call)
+                results.append(None)  # Results already applied to state
+            return results
+        
+        # Filter to only parallel-safe workers
+        safe_calls = []
+        for call in calls:
+            worker = self.registry.get(call.worker_name)
+            if worker and worker.parallel_safe:
+                safe_calls.append(call)
+            elif worker:
+                logger.warning(f"Worker '{call.worker_name}' is not parallel-safe, executing sequentially")
+                await self._execute_worker(state, call)
+        
+        if not safe_calls:
+            return []
+        
+        logger.debug(f"Executing {len(safe_calls)} workers in parallel")
+        
+        # Create tasks for parallel execution
+        tasks = [
+            self._execute_worker_get_output(state, call)
+            for call in safe_calls
+        ]
+        
+        # Execute in parallel
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Apply results to state (sequentially to maintain consistency)
+        for call, result in zip(safe_calls, results):
+            if isinstance(result, Exception):
+                logger.error(f"Parallel worker error: {result}")
+                state.add_feedback(Feedback(
+                    source="Orchestrator",
+                    critique=f"Worker '{call.worker_name}' failed: {str(result)}",
+                    passed=False
+                ))
+            elif result is not None:
+                worker = self.registry.get(call.worker_name)
+                if worker:
+                    self._apply_worker_output(state, result, worker.name)
+        
+        return results
+
+    async def _execute_worker_get_output(
+        self,
+        state: Blackboard,
+        call: WorkerCall
+    ) -> Optional[WorkerOutput]:
+        """Execute a worker and return output (for parallel execution)."""
+        worker = self.registry.get(call.worker_name)
         
         if worker is None:
-            logger.warning(f"Worker '{decision.worker_name}' not found")
+            logger.warning(f"Worker '{call.worker_name}' not found")
+            return None
+        
+        await self._publish_event(EventType.WORKER_CALLED, {
+            "worker": worker.name,
+            "instructions": call.instructions,
+            "parallel": True
+        })
+        
+        # Parse inputs if worker has a schema
+        inputs = None
+        if call.inputs:
+            inputs = worker.parse_inputs(call.inputs)
+        elif call.instructions:
+            inputs = WorkerInput(instructions=call.instructions)
+        
+        # Define the worker execution function
+        async def execute():
+            return await worker.run(state, inputs)
+        
+        try:
+            output = await retry_with_backoff(execute, policy=self.retry_policy)
+            
+            await self._publish_event(EventType.WORKER_COMPLETED, {
+                "worker": worker.name,
+                "has_artifact": output.has_artifact(),
+                "has_feedback": output.has_feedback(),
+                "parallel": True
+            })
+            
+            return output
+            
+        except Exception as e:
+            logger.error(f"Worker error: {e}")
+            await self._publish_event(EventType.WORKER_ERROR, {
+                "worker": worker.name,
+                "error": str(e),
+                "parallel": True
+            })
+            raise
+
+    async def _execute_worker(self, state: Blackboard, call: WorkerCall) -> None:
+        """Execute a single worker with retry logic."""
+        worker = self.registry.get(call.worker_name)
+        
+        if worker is None:
+            logger.warning(f"Worker '{call.worker_name}' not found")
             return
         
         # Update status based on worker type (heuristic)
@@ -290,22 +439,28 @@ Actions:
         else:
             state.update_status(Status.GENERATING)
         
-        # Inject instructions into metadata for the worker
-        state.metadata["current_instructions"] = decision.instructions
+        # Inject instructions into metadata for backward compat
+        state.metadata["current_instructions"] = call.instructions
         
         await self._publish_event(EventType.WORKER_CALLED, {
             "worker": worker.name,
-            "instructions": decision.instructions
+            "instructions": call.instructions
         })
+        
+        # Parse inputs if worker has a schema
+        inputs = None
+        if call.inputs:
+            inputs = worker.parse_inputs(call.inputs)
+        elif call.instructions:
+            inputs = WorkerInput(instructions=call.instructions)
         
         # Define the worker execution function
         async def execute():
-            return await worker.run(state)
+            return await worker.run(state, inputs)
         
         # Retry callback for observability
         def on_retry(attempt: int, exception: Exception, delay: float):
             logger.warning(f"Retrying {worker.name} (attempt {attempt + 2})")
-            # Sync publish for retry events during backoff
             self.event_bus.publish(Event(EventType.WORKER_RETRY, {
                 "worker": worker.name,
                 "attempt": attempt + 1,
@@ -314,7 +469,6 @@ Actions:
             }))
         
         try:
-            # Execute with retry
             output = await retry_with_backoff(
                 execute,
                 policy=self.retry_policy,
@@ -352,7 +506,7 @@ Actions:
             })
             state.add_feedback(Feedback(
                 source="Orchestrator",
-                critique=f"Worker '{decision.worker_name}' failed: {str(e)}",
+                critique=f"Worker '{call.worker_name}' failed: {str(e)}",
                 passed=False
             ))
 
@@ -362,27 +516,26 @@ Actions:
         state: Optional[Blackboard] = None,
         max_steps: int = 20
     ) -> Blackboard:
-        """
-        Synchronous wrapper for run().
-        
-        Convenience method for non-async contexts.
-        """
+        """Synchronous wrapper for run()."""
         return asyncio.run(self.run(goal=goal, state=state, max_steps=max_steps))
 
     async def _get_supervisor_decision(self, context: str) -> SupervisorDecision:
         """Ask the LLM supervisor what to do next."""
-        # Build the worker list for the system prompt
-        worker_list = "\n".join([
-            f"- **{name}**: {desc}"
-            for name, desc in self.registry.list_workers().items()
-        ])
+        # Build the worker list with schemas
+        worker_info = self.registry.list_workers_with_schemas()
+        worker_lines = []
+        for name, info in worker_info.items():
+            line = f"- **{name}**: {info['description']}"
+            if info.get('input_schema'):
+                line += f" (accepts structured input)"
+            worker_lines.append(line)
+        worker_list = "\n".join(worker_lines)
         
         system_prompt = self.SUPERVISOR_SYSTEM_PROMPT.format(worker_list=worker_list)
         
         full_prompt = f"{system_prompt}\n\n## Current State\n{context}\n\n## Your Decision (JSON only):"
         
         try:
-            # Support both sync and async LLM clients
             result = self.llm.generate(full_prompt)
             if asyncio.iscoroutine(result):
                 response = await result
@@ -391,7 +544,6 @@ Actions:
             return self._parse_llm_response(response)
         except Exception as e:
             logger.error(f"LLM error: {e}")
-            # Fallback: try to continue sensibly
             return SupervisorDecision(
                 action="fail",
                 reasoning=f"LLM error: {str(e)}"
@@ -399,17 +551,51 @@ Actions:
 
     def _parse_llm_response(self, response: str) -> SupervisorDecision:
         """Parse the JSON response from the LLM."""
-        # Try to extract JSON from the response
-        json_match = re.search(r'\{[^{}]*\}', response, re.DOTALL)
+        # Try to find and parse the full JSON object
+        # Handle nested objects by finding matching braces
+        def find_json_object(text: str) -> Optional[str]:
+            start = text.find('{')
+            if start == -1:
+                return None
+            
+            depth = 0
+            for i, char in enumerate(text[start:], start):
+                if char == '{':
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return text[start:i+1]
+            return None
         
-        if json_match:
+        json_str = find_json_object(response)
+        
+        if json_str:
             try:
-                data = json.loads(json_match.group())
+                data = json.loads(json_str)
+                action = data.get("action", "fail")
+                reasoning = data.get("reasoning", "")
+                
+                # Parse calls
+                calls = []
+                if action == "call_parallel" and "calls" in data:
+                    for call_data in data["calls"]:
+                        calls.append(WorkerCall(
+                            worker_name=call_data.get("worker", ""),
+                            instructions=call_data.get("instructions", ""),
+                            inputs=call_data.get("inputs", {})
+                        ))
+                elif action == "call" and "worker" in data:
+                    calls.append(WorkerCall(
+                        worker_name=data.get("worker", ""),
+                        instructions=data.get("instructions", ""),
+                        inputs=data.get("inputs", {})
+                    ))
+                
                 return SupervisorDecision(
-                    action=data.get("action", "fail"),
-                    worker_name=data.get("worker"),
-                    instructions=data.get("instructions", ""),
-                    reasoning=data.get("reasoning", "")
+                    action=action,
+                    calls=calls,
+                    reasoning=reasoning
                 )
             except json.JSONDecodeError:
                 pass
@@ -421,7 +607,6 @@ Actions:
         elif "fail" in response_lower:
             return SupervisorDecision(action="fail", reasoning="Parsed 'fail' from response")
         
-        # Default to fail if we can't parse
         return SupervisorDecision(
             action="fail",
             reasoning=f"Could not parse LLM response: {response[:100]}"
@@ -430,13 +615,11 @@ Actions:
     def _apply_worker_output(self, state: Blackboard, output: WorkerOutput, worker_name: str) -> None:
         """Apply the worker's output to the blackboard."""
         if output.has_artifact():
-            # Ensure creator is set
             if not output.artifact.creator:
                 output.artifact.creator = worker_name
             state.add_artifact(output.artifact)
         
         if output.has_feedback():
-            # Link to last artifact if not specified
             if not output.feedback.artifact_id and state.artifacts:
                 output.feedback.artifact_id = state.artifacts[-1].id
             if not output.feedback.source:
@@ -459,27 +642,16 @@ async def run_blackboard(
     workers: List[Worker],
     max_steps: int = 20,
     verbose: bool = False,
-    event_bus: Optional[EventBus] = None
+    event_bus: Optional[EventBus] = None,
+    enable_parallel: bool = True
 ) -> Blackboard:
-    """
-    Convenience function to run the blackboard system (async).
-    
-    Args:
-        goal: The objective to accomplish
-        llm: An LLM client
-        workers: List of workers
-        max_steps: Maximum iterations
-        verbose: Enable debug logging
-        event_bus: Optional event bus for observability
-        
-    Returns:
-        Final blackboard state
-    """
+    """Convenience function to run the blackboard system (async)."""
     orchestrator = Orchestrator(
         llm=llm,
         workers=workers,
         verbose=verbose,
-        event_bus=event_bus
+        event_bus=event_bus,
+        enable_parallel=enable_parallel
     )
     return await orchestrator.run(goal=goal, max_steps=max_steps)
 
@@ -491,7 +663,5 @@ def run_blackboard_sync(
     max_steps: int = 20,
     verbose: bool = False
 ) -> Blackboard:
-    """
-    Convenience function to run the blackboard system (sync).
-    """
+    """Convenience function to run the blackboard system (sync)."""
     return asyncio.run(run_blackboard(goal, llm, workers, max_steps, verbose))

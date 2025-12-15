@@ -2,3 +2,4 @@ blackboard_core.egg-info
 .pytest_cache 
 env
 __pycache__
+session.json

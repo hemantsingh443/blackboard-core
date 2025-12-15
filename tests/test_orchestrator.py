@@ -1,10 +1,10 @@
 """Tests for the Orchestrator."""
 
 import pytest
-from typing import List
+from typing import List, Optional
 
 from blackboard import (
-    Orchestrator, Worker, WorkerOutput, 
+    Orchestrator, Worker, WorkerOutput, WorkerInput,
     Artifact, Feedback, Blackboard, Status
 )
 
@@ -31,8 +31,12 @@ class SimpleWriter(Worker):
     name = "Writer"
     description = "Writes text content"
     
-    async def run(self, state: Blackboard) -> WorkerOutput:
-        instructions = state.metadata.get("current_instructions", "")
+    async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
+        instructions = ""
+        if inputs:
+            instructions = inputs.instructions
+        else:
+            instructions = state.metadata.get("current_instructions", "")
         content = f"Generated content: {instructions}" if instructions else "Default content"
         return WorkerOutput(
             artifact=Artifact(type="text", content=content, creator=self.name)
@@ -47,7 +51,7 @@ class SimpleReviewer(Worker):
     def __init__(self, should_pass: bool = True):
         self.should_pass = should_pass
     
-    async def run(self, state: Blackboard) -> WorkerOutput:
+    async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
         last_artifact = state.get_last_artifact()
         return WorkerOutput(
             feedback=Feedback(
@@ -176,6 +180,104 @@ class TestOrchestrator:
         # Use sync wrapper
         result = orch.run_sync(goal="Quick test", max_steps=1)
         assert result.status == Status.DONE
+
+
+class TestParallelExecution:
+    """Tests for parallel worker execution."""
+    
+    @pytest.mark.asyncio
+    async def test_parallel_worker_call(self):
+        """Test parallel worker execution."""
+        
+        class ResearcherA(Worker):
+            name = "ResearcherA"
+            description = "Researches topic A"
+            parallel_safe = True
+            
+            async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
+                return WorkerOutput(
+                    artifact=Artifact(type="research", content="Topic A findings", creator=self.name)
+                )
+        
+        class ResearcherB(Worker):
+            name = "ResearcherB"
+            description = "Researches topic B"
+            parallel_safe = True
+            
+            async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
+                return WorkerOutput(
+                    artifact=Artifact(type="research", content="Topic B findings", creator=self.name)
+                )
+        
+        llm = MockLLM([
+            '{"action": "call_parallel", "calls": [{"worker": "ResearcherA", "instructions": "Research A"}, {"worker": "ResearcherB", "instructions": "Research B"}], "reasoning": "Independent tasks"}',
+            '{"action": "done", "reasoning": "Both done"}'
+        ])
+        
+        orch = Orchestrator(
+            llm=llm,
+            workers=[ResearcherA(), ResearcherB()],
+            enable_parallel=True
+        )
+        
+        result = await orch.run(goal="Research topics", max_steps=5)
+        
+        assert result.status == Status.DONE
+        # Both artifacts should be created
+        assert len(result.artifacts) == 2
+    
+    @pytest.mark.asyncio
+    async def test_parallel_disabled_falls_back_to_sequential(self):
+        """Test that parallel execution can be disabled."""
+        
+        class SimpleWorker(Worker):
+            name = "Simple"
+            description = "Simple worker"
+            execution_count = 0
+            
+            async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
+                SimpleWorker.execution_count += 1
+                return WorkerOutput(
+                    artifact=Artifact(type="text", content=f"Run {SimpleWorker.execution_count}", creator=self.name)
+                )
+        
+        SimpleWorker.execution_count = 0
+        
+        llm = MockLLM([
+            '{"action": "call", "worker": "Simple", "instructions": "Work"}',
+            '{"action": "done", "reasoning": "Done"}'
+        ])
+        
+        orch = Orchestrator(
+            llm=llm,
+            workers=[SimpleWorker()],
+            enable_parallel=False
+        )
+        
+        result = await orch.run(goal="Test", max_steps=5)
+        
+        assert result.status == Status.DONE
+        assert SimpleWorker.execution_count == 1
+
+
+class TestWorkerInput:
+    """Tests for worker input schemas."""
+    
+    def test_worker_input_creation(self):
+        """Test creating a WorkerInput."""
+        inputs = WorkerInput(instructions="Do something")
+        assert inputs.instructions == "Do something"
+    
+    def test_custom_worker_input(self):
+        """Test custom worker input schema."""
+        
+        class CustomInput(WorkerInput):
+            language: str = "python"
+            include_tests: bool = False
+        
+        inputs = CustomInput(instructions="Generate code", language="rust", include_tests=True)
+        assert inputs.language == "rust"
+        assert inputs.include_tests is True
 
 
 class TestLLMProtocol:

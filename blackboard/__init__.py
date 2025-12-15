@@ -24,12 +24,12 @@ Quick Start:
 """
 
 from .state import Artifact, Feedback, Blackboard, Status
-from .protocols import Worker, WorkerOutput, WorkerRegistry
-from .core import Orchestrator, LLMClient, SupervisorDecision, run_blackboard, run_blackboard_sync
+from .protocols import Worker, WorkerOutput, WorkerRegistry, WorkerInput
+from .core import Orchestrator, LLMClient, SupervisorDecision, WorkerCall, run_blackboard, run_blackboard_sync
 from .events import EventBus, Event, EventType, get_event_bus, reset_event_bus
 from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, NO_RETRY, is_transient_error
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     # State models
@@ -41,10 +41,12 @@ __all__ = [
     "Worker",
     "WorkerOutput",
     "WorkerRegistry",
+    "WorkerInput",
     # Orchestrator
     "Orchestrator",
     "LLMClient",
     "SupervisorDecision",
+    "WorkerCall",
     "run_blackboard",
     "run_blackboard_sync",
     # Events
