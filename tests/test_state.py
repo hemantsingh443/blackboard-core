@@ -159,7 +159,7 @@ class TestBlackboard:
         assert "Write a poem" in context
         assert "Roses are red" in context
         assert "Too cliche" in context
-        assert "Passed: False" in context
+        assert "FAILED" in context
 
 
 class TestStatus:

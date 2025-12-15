@@ -7,7 +7,8 @@ All state is stored in typed Pydantic models for strict validation.
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -39,8 +40,7 @@ class Artifact(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Optional extra context")
 
-    class Config:
-        extra = "allow"
+    model_config = {"extra": "allow"}
 
 
 class Feedback(BaseModel):
@@ -59,8 +59,7 @@ class Feedback(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Optional extra context")
 
-    class Config:
-        extra = "allow"
+    model_config = {"extra": "allow"}
 
 
 class Blackboard(BaseModel):
@@ -81,8 +80,57 @@ class Blackboard(BaseModel):
     step_count: int = Field(default=0, description="Number of steps executed")
     history: List[Dict[str, Any]] = Field(default_factory=list, description="Execution history log")
 
-    class Config:
-        extra = "allow"
+    model_config = {"extra": "allow"}
+
+    # =========================================================================
+    # Persistence Methods
+    # =========================================================================
+    
+    def save_to_json(self, path: Union[str, Path]) -> None:
+        """
+        Save the blackboard state to a JSON file.
+        
+        Args:
+            path: Path to save the JSON file
+            
+        Example:
+            state.save_to_json("session_001.json")
+        """
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(self.model_dump_json(indent=2))
+    
+    @classmethod
+    def load_from_json(cls, path: Union[str, Path]) -> "Blackboard":
+        """
+        Load blackboard state from a JSON file.
+        
+        Args:
+            path: Path to the JSON file
+            
+        Returns:
+            Restored Blackboard instance
+            
+        Example:
+            state = Blackboard.load_from_json("session_001.json")
+        """
+        path = Path(path)
+        with open(path, 'r', encoding='utf-8') as f:
+            return cls.model_validate_json(f.read())
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary (for custom serialization)."""
+        return self.model_dump()
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "Blackboard":
+        """Create from dictionary."""
+        return cls.model_validate(data)
+
+    # =========================================================================
+    # Artifact & Feedback Methods
+    # =========================================================================
 
     def get_last_artifact(self, artifact_type: Optional[str] = None) -> Optional[Artifact]:
         """
@@ -156,30 +204,79 @@ class Blackboard(BaseModel):
             "step": self.step_count
         })
 
-    def to_context_string(self) -> str:
+    # =========================================================================
+    # Context Generation (with history management)
+    # =========================================================================
+
+    def to_context_string(
+        self,
+        max_artifacts: int = 3,
+        max_feedback: int = 5,
+        max_content_length: int = 500
+    ) -> str:
         """
         Generate a human-readable context string for the supervisor LLM.
         
         This is what the Supervisor "sees" when deciding what to do next.
+        Implements sliding window to prevent context overflow.
+        
+        Args:
+            max_artifacts: Maximum number of recent artifacts to include
+            max_feedback: Maximum number of recent feedback entries to include
+            max_content_length: Maximum length of artifact content preview
         """
         lines = [
             f"## Goal\n{self.goal}",
             f"\n## Status\n{self.status.value.upper()}",
         ]
         
-        # Add latest artifact info
-        if self.artifacts:
-            last = self.artifacts[-1]
-            content_preview = str(last.content)[:500]
-            if len(str(last.content)) > 500:
-                content_preview += "..."
-            lines.append(f"\n## Latest Artifact\n- Type: {last.type}\n- Creator: {last.creator}\n- Content:\n{content_preview}")
+        # Add recent artifacts (sliding window)
+        recent_artifacts = self.artifacts[-max_artifacts:] if self.artifacts else []
+        if recent_artifacts:
+            if len(self.artifacts) > max_artifacts:
+                lines.append(f"\n## Artifacts ({len(self.artifacts)} total, showing last {max_artifacts})")
+            else:
+                lines.append(f"\n## Artifacts ({len(self.artifacts)} total)")
+            
+            for artifact in recent_artifacts:
+                content_preview = str(artifact.content)[:max_content_length]
+                if len(str(artifact.content)) > max_content_length:
+                    content_preview += "..."
+                lines.append(f"\n### {artifact.type} (v{artifact.version}) by {artifact.creator}")
+                lines.append(f"{content_preview}")
         
-        # Add latest feedback
-        if self.feedback:
-            last_fb = self.feedback[-1]
-            lines.append(f"\n## Latest Feedback\n- From: {last_fb.source}\n- Passed: {last_fb.passed}\n- Critique: {last_fb.critique}")
+        # Add recent feedback (sliding window)
+        recent_feedback = self.feedback[-max_feedback:] if self.feedback else []
+        if recent_feedback:
+            if len(self.feedback) > max_feedback:
+                lines.append(f"\n## Feedback ({len(self.feedback)} total, showing last {max_feedback})")
+            else:
+                lines.append(f"\n## Feedback ({len(self.feedback)} total)")
+            
+            for fb in recent_feedback:
+                status = "PASSED" if fb.passed else "FAILED"
+                lines.append(f"\n- [{status}] {fb.source}: {fb.critique}")
         
         lines.append(f"\n## Step Count\n{self.step_count}")
         
         return "\n".join(lines)
+
+    def get_context_summary(self) -> str:
+        """
+        Get a brief summary of the current state.
+        
+        Useful for condensed logging or status displays.
+        """
+        artifact_count = len(self.artifacts)
+        feedback_count = len(self.feedback)
+        last_passed = None
+        if self.feedback:
+            last_passed = self.feedback[-1].passed
+        
+        return (
+            f"Status: {self.status.value} | "
+            f"Steps: {self.step_count} | "
+            f"Artifacts: {artifact_count} | "
+            f"Feedback: {feedback_count} | "
+            f"Last Review: {'Passed' if last_passed else 'Failed' if last_passed is not None else 'N/A'}"
+        )

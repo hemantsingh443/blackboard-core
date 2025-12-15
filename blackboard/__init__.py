@@ -10,20 +10,26 @@ Quick Start:
         name = "Writer"
         description = "Generates text content"
         
-        def run(self, state: Blackboard) -> WorkerOutput:
+        async def run(self, state: Blackboard) -> WorkerOutput:
             return WorkerOutput(
                 artifact=Artifact(type="text", content="Hello!", creator=self.name)
             )
     
     orchestrator = Orchestrator(llm=my_llm_client, workers=[MyWriter()])
-    result = orchestrator.run(goal="Write a greeting")
+    result = await orchestrator.run(goal="Write a greeting")
+    
+    # Save and resume
+    result.save_to_json("session.json")
+    resumed = Blackboard.load_from_json("session.json")
 """
 
 from .state import Artifact, Feedback, Blackboard, Status
 from .protocols import Worker, WorkerOutput, WorkerRegistry
 from .core import Orchestrator, LLMClient, SupervisorDecision, run_blackboard, run_blackboard_sync
+from .events import EventBus, Event, EventType, get_event_bus, reset_event_bus
+from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, NO_RETRY, is_transient_error
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     # State models
@@ -41,4 +47,16 @@ __all__ = [
     "SupervisorDecision",
     "run_blackboard",
     "run_blackboard_sync",
+    # Events
+    "EventBus",
+    "Event",
+    "EventType",
+    "get_event_bus",
+    "reset_event_bus",
+    # Retry
+    "RetryPolicy",
+    "retry_with_backoff",
+    "DEFAULT_RETRY_POLICY",
+    "NO_RETRY",
+    "is_transient_error",
 ]
