@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackboard-core"
-version = "0.1.0"
+version = "0.5.1"
 description = "A Python SDK implementing the Blackboard Pattern for centralized state multi-agent systems"
 readme = "README.md"
-license = {text = "MIT"}
+license = {file = "LICENSE"}
 requires-python = ">=3.9"
 authors = [
-    {name = "Blackboard Core Team"}
+    {name = "Hemant Singh"}
 ]
 keywords = ["agents", "multi-agent", "blackboard", "orchestration", "llm"]
 classifiers = [
