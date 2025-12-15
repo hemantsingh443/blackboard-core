@@ -44,8 +44,12 @@ from .tools import (
 from .memory import (
     Memory, MemoryEntry, SearchResult, SimpleVectorMemory, MemoryWorker, MemoryInput
 )
+from .embeddings import (
+    EmbeddingModel, NoOpEmbedder, TFIDFEmbedder, LocalEmbedder, OpenAIEmbedder,
+    cosine_similarity, get_default_embedder
+)
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = [
     # State models
@@ -112,4 +116,12 @@ __all__ = [
     "SimpleVectorMemory",
     "MemoryWorker",
     "MemoryInput",
+    # Embeddings
+    "EmbeddingModel",
+    "NoOpEmbedder",
+    "TFIDFEmbedder",
+    "LocalEmbedder",
+    "OpenAIEmbedder",
+    "cosine_similarity",
+    "get_default_embedder",
 ]

@@ -5,13 +5,17 @@ Vector-based memory for RAG (Retrieval Augmented Generation) support.
 """
 
 import json
-import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Union
 import hashlib
+
+from .embeddings import (
+    EmbeddingModel, TFIDFEmbedder, NoOpEmbedder, 
+    cosine_similarity, get_default_embedder
+)
 
 
 @dataclass
@@ -105,56 +109,90 @@ class SimpleVectorMemory(Memory):
     """
     A simple in-memory vector store using cosine similarity.
     
-    Uses basic TF-IDF-like embeddings. For production, use
-    OpenAI embeddings or a proper vector database.
+    Accepts any EmbeddingModel implementation for flexibility:
+    - TFIDFEmbedder (default): Lightweight, no dependencies
+    - LocalEmbedder: High quality, uses sentence-transformers
+    - OpenAIEmbedder: Best quality, requires API key
     
     Example:
+        # Default (TF-IDF)
         memory = SimpleVectorMemory()
-        memory.add("User prefers Python 3.11", {"source": "conversation"})
         
-        results = memory.search("What Python version?")
-        for r in results:
-            print(f"{r.score:.2f}: {r.entry.content}")
+        # With semantic embeddings
+        from blackboard import LocalEmbedder
+        memory = SimpleVectorMemory(embedder=LocalEmbedder())
+        
+        # With OpenAI
+        from blackboard import OpenAIEmbedder
+        memory = SimpleVectorMemory(embedder=OpenAIEmbedder(api_key="sk-..."))
     """
     
-    def __init__(self, persist_path: Optional[str] = None):
+    def __init__(
+        self,
+        embedder: Optional[EmbeddingModel] = None,
+        persist_path: Optional[str] = None
+    ):
         """
         Initialize the memory store.
         
         Args:
+            embedder: Embedding model (default: TFIDFEmbedder)
             persist_path: Optional path to persist memories to disk
         """
         self._memories: Dict[str, MemoryEntry] = {}
-        self._vocabulary: Dict[str, int] = {}
-        self._idf: Dict[str, float] = {}
+        self._embedder = embedder or TFIDFEmbedder()
         self.persist_path = persist_path
         
         if persist_path and Path(persist_path).exists():
             self._load()
     
+    @property
+    def embedder(self) -> EmbeddingModel:
+        """Get the current embedder."""
+        return self._embedder
+    
     def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> MemoryEntry:
         """Add a memory with auto-generated embedding."""
         entry = MemoryEntry(content=content, metadata=metadata or {})
-        entry.embedding = self._compute_embedding(content)
+        entry.embedding = self._embedder.embed_query(content)
         self._memories[entry.id] = entry
-        self._update_idf()
         
         if self.persist_path:
             self._save()
         
         return entry
     
+    def add_many(self, contents: List[str], metadata: Optional[List[Dict[str, Any]]] = None) -> List[MemoryEntry]:
+        """Add multiple memories efficiently (batch embedding)."""
+        if metadata is None:
+            metadata = [{}] * len(contents)
+        
+        # Batch embed
+        embeddings = self._embedder.embed_documents(contents)
+        
+        entries = []
+        for content, emb, meta in zip(contents, embeddings, metadata):
+            entry = MemoryEntry(content=content, metadata=meta)
+            entry.embedding = emb
+            self._memories[entry.id] = entry
+            entries.append(entry)
+        
+        if self.persist_path:
+            self._save()
+        
+        return entries
+    
     def search(self, query: str, limit: int = 5) -> List[SearchResult]:
         """Search for similar memories using cosine similarity."""
         if not self._memories:
             return []
         
-        query_embedding = self._compute_embedding(query)
+        query_embedding = self._embedder.embed_query(query)
         
         results = []
         for entry in self._memories.values():
             if entry.embedding:
-                score = self._cosine_similarity(query_embedding, entry.embedding)
+                score = cosine_similarity(query_embedding, entry.embedding)
                 results.append(SearchResult(entry=entry, score=score))
         
         # Sort by score descending
@@ -178,8 +216,6 @@ class SimpleVectorMemory(Memory):
         """Clear all memories."""
         count = len(self._memories)
         self._memories.clear()
-        self._vocabulary.clear()
-        self._idf.clear()
         if self.persist_path:
             self._save()
         return count
@@ -188,79 +224,6 @@ class SimpleVectorMemory(Memory):
         """Get all memories."""
         return list(self._memories.values())
     
-    def _tokenize(self, text: str) -> List[str]:
-        """Simple tokenization."""
-        # Lowercase and split on non-alphanumeric
-        import re
-        tokens = re.findall(r'\b\w+\b', text.lower())
-        return tokens
-    
-    def _compute_embedding(self, text: str) -> List[float]:
-        """Compute a simple TF-IDF-like embedding."""
-        tokens = self._tokenize(text)
-        
-        # Update vocabulary
-        for token in tokens:
-            if token not in self._vocabulary:
-                self._vocabulary[token] = len(self._vocabulary)
-        
-        # Compute term frequency
-        tf: Dict[str, float] = {}
-        for token in tokens:
-            tf[token] = tf.get(token, 0) + 1
-        
-        # Normalize TF
-        max_tf = max(tf.values()) if tf else 1
-        for token in tf:
-            tf[token] = tf[token] / max_tf
-        
-        # Create embedding vector
-        embedding = [0.0] * len(self._vocabulary)
-        for token, freq in tf.items():
-            idx = self._vocabulary[token]
-            idf = self._idf.get(token, 1.0)
-            embedding[idx] = freq * idf
-        
-        # Normalize
-        norm = math.sqrt(sum(x * x for x in embedding))
-        if norm > 0:
-            embedding = [x / norm for x in embedding]
-        
-        return embedding
-    
-    def _update_idf(self) -> None:
-        """Update IDF scores."""
-        n_docs = len(self._memories)
-        if n_docs == 0:
-            return
-        
-        # Count document frequency for each term
-        df: Dict[str, int] = {}
-        for entry in self._memories.values():
-            tokens = set(self._tokenize(entry.content))
-            for token in tokens:
-                df[token] = df.get(token, 0) + 1
-        
-        # Compute IDF
-        for token, count in df.items():
-            self._idf[token] = math.log(n_docs / (1 + count))
-    
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
-        """Compute cosine similarity between two vectors."""
-        # Pad shorter vector
-        max_len = max(len(a), len(b))
-        a = a + [0.0] * (max_len - len(a))
-        b = b + [0.0] * (max_len - len(b))
-        
-        dot_product = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(x * x for x in b))
-        
-        if norm_a == 0 or norm_b == 0:
-            return 0.0
-        
-        return dot_product / (norm_a * norm_b)
-    
     def _save(self) -> None:
         """Persist memories to disk."""
         if not self.persist_path:
@@ -268,8 +231,7 @@ class SimpleVectorMemory(Memory):
         
         data = {
             "memories": [e.to_dict() for e in self._memories.values()],
-            "vocabulary": self._vocabulary,
-            "idf": self._idf
+            "embedder_type": type(self._embedder).__name__
         }
         
         Path(self.persist_path).write_text(json.dumps(data, indent=2))
@@ -280,9 +242,6 @@ class SimpleVectorMemory(Memory):
             return
         
         data = json.loads(Path(self.persist_path).read_text())
-        
-        self._vocabulary = data.get("vocabulary", {})
-        self._idf = data.get("idf", {})
         
         for entry_data in data.get("memories", []):
             entry = MemoryEntry.from_dict(entry_data)
