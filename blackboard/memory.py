@@ -4,6 +4,7 @@ Long-Term Memory System
 Vector-based memory for RAG (Retrieval Augmented Generation) support.
 """
 
+import asyncio
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -72,35 +73,38 @@ class Memory(ABC):
     """
     Abstract interface for long-term memory.
     
+    All methods are async to support non-blocking I/O operations
+    with external embedders and vector databases.
+    
     Implement this to create custom memory backends.
     """
     
     @abstractmethod
-    def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> MemoryEntry:
+    async def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> MemoryEntry:
         """Add a memory entry."""
         pass
     
     @abstractmethod
-    def search(self, query: str, limit: int = 5) -> List[SearchResult]:
+    async def search(self, query: str, limit: int = 5) -> List[SearchResult]:
         """Search for relevant memories."""
         pass
     
     @abstractmethod
-    def get(self, id: str) -> Optional[MemoryEntry]:
+    async def get(self, id: str) -> Optional[MemoryEntry]:
         """Get a specific memory by ID."""
         pass
     
     @abstractmethod
-    def delete(self, id: str) -> bool:
+    async def delete(self, id: str) -> bool:
         """Delete a memory by ID."""
         pass
     
     @abstractmethod
-    def clear(self) -> int:
+    async def clear(self) -> int:
         """Clear all memories. Returns count of deleted entries."""
         pass
     
-    def get_all(self) -> List[MemoryEntry]:
+    async def get_all(self) -> List[MemoryEntry]:
         """Get all memories (optional, may not scale)."""
         raise NotImplementedError("get_all not implemented for this memory backend")
 
@@ -156,24 +160,33 @@ class SimpleVectorMemory(Memory):
         """Get the current embedder."""
         return self._embedder
     
-    def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> MemoryEntry:
+    async def add(self, content: str, metadata: Optional[Dict[str, Any]] = None) -> MemoryEntry:
         """Add a memory with auto-generated embedding."""
         entry = MemoryEntry(content=content, metadata=metadata or {})
-        entry.embedding = self._embedder.embed_query(content)
+        
+        # Use async embedder if available, otherwise run in thread pool
+        if hasattr(self._embedder, 'embed_query_async'):
+            entry.embedding = await self._embedder.embed_query_async(content)
+        else:
+            entry.embedding = await asyncio.to_thread(self._embedder.embed_query, content)
+        
         self._memories[entry.id] = entry
         
         if self.persist_path:
-            self._save()
+            await asyncio.to_thread(self._save)
         
         return entry
     
-    def add_many(self, contents: List[str], metadata: Optional[List[Dict[str, Any]]] = None) -> List[MemoryEntry]:
+    async def add_many(self, contents: List[str], metadata: Optional[List[Dict[str, Any]]] = None) -> List[MemoryEntry]:
         """Add multiple memories efficiently (batch embedding)."""
         if metadata is None:
             metadata = [{}] * len(contents)
         
-        # Batch embed
-        embeddings = self._embedder.embed_documents(contents)
+        # Batch embed - use async if available
+        if hasattr(self._embedder, 'embed_documents_async'):
+            embeddings = await self._embedder.embed_documents_async(contents)
+        else:
+            embeddings = await asyncio.to_thread(self._embedder.embed_documents, contents)
         
         entries = []
         for content, emb, meta in zip(contents, embeddings, metadata):
@@ -183,16 +196,20 @@ class SimpleVectorMemory(Memory):
             entries.append(entry)
         
         if self.persist_path:
-            self._save()
+            await asyncio.to_thread(self._save)
         
         return entries
     
-    def search(self, query: str, limit: int = 5) -> List[SearchResult]:
+    async def search(self, query: str, limit: int = 5) -> List[SearchResult]:
         """Search for similar memories using cosine similarity."""
         if not self._memories:
             return []
         
-        query_embedding = self._embedder.embed_query(query)
+        # Use async embedder if available, otherwise run in thread pool
+        if hasattr(self._embedder, 'embed_query_async'):
+            query_embedding = await self._embedder.embed_query_async(query)
+        else:
+            query_embedding = await asyncio.to_thread(self._embedder.embed_query, query)
         
         results = []
         for entry in self._memories.values():
@@ -204,28 +221,28 @@ class SimpleVectorMemory(Memory):
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:limit]
     
-    def get(self, id: str) -> Optional[MemoryEntry]:
+    async def get(self, id: str) -> Optional[MemoryEntry]:
         """Get a memory by ID."""
         return self._memories.get(id)
     
-    def delete(self, id: str) -> bool:
+    async def delete(self, id: str) -> bool:
         """Delete a memory by ID."""
         if id in self._memories:
             del self._memories[id]
             if self.persist_path:
-                self._save()
+                await asyncio.to_thread(self._save)
             return True
         return False
     
-    def clear(self) -> int:
+    async def clear(self) -> int:
         """Clear all memories."""
         count = len(self._memories)
         self._memories.clear()
         if self.persist_path:
-            self._save()
+            await asyncio.to_thread(self._save)
         return count
     
-    def get_all(self) -> List[MemoryEntry]:
+    async def get_all(self) -> List[MemoryEntry]:
         """Get all memories."""
         return list(self._memories.values())
     
@@ -298,7 +315,7 @@ class MemoryWorker(Worker):
         
         if operation == "search":
             query = inputs.query or inputs.instructions
-            results = self.memory.search(query, limit=inputs.limit)
+            results = await self.memory.search(query, limit=inputs.limit)
             
             if not results:
                 content = "No relevant memories found."
@@ -322,7 +339,7 @@ class MemoryWorker(Worker):
         
         elif operation == "add":
             content = inputs.content or inputs.instructions
-            entry = self.memory.add(content, {"source": "worker"})
+            entry = await self.memory.add(content, {"source": "worker"})
             
             return WorkerOutput(
                 artifact=Artifact(
@@ -334,7 +351,7 @@ class MemoryWorker(Worker):
             )
         
         elif operation == "delete":
-            success = self.memory.delete(inputs.memory_id)
+            success = await self.memory.delete(inputs.memory_id)
             
             return WorkerOutput(
                 feedback=Feedback(

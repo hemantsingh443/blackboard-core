@@ -27,8 +27,14 @@ pip install blackboard-core
 
 Optional dependencies:
 ```bash
-pip install sentence-transformers  # For LocalEmbedder
-pip install openai                 # For OpenAIEmbedder
+pip install blackboard-core[redis]   # RedisPersistence
+pip install blackboard-core[chroma]  # ChromaMemory (vector DB)
+pip install blackboard-core[hybrid]  # HybridSearchMemory (BM25)
+pip install blackboard-core[all]     # All optional features
+
+# Or install embedders directly:
+pip install sentence-transformers    # For LocalEmbedder
+pip install openai                   # For OpenAI embeddings
 ```
 
 ---

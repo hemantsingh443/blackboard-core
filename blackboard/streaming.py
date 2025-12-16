@@ -184,6 +184,7 @@ def wrap_non_streaming(
     Wrap a non-streaming generate function to return a fake stream.
     
     Useful for testing or when streaming isn't available.
+    Exceptions are properly propagated to the caller.
     
     Args:
         generate_fn: Regular generate function
@@ -192,9 +193,13 @@ def wrap_non_streaming(
         Function that yields the full response as a single token
     """
     async def streaming_wrapper(prompt: str) -> AsyncIterator[str]:
-        result = generate_fn(prompt)
-        if asyncio.iscoroutine(result):
-            result = await result
-        yield result
+        try:
+            result = generate_fn(prompt)
+            if asyncio.iscoroutine(result):
+                result = await result
+            yield result
+        except Exception as e:
+            logger.error(f"Error in wrapped generate function: {e}")
+            raise
     
     return streaming_wrapper

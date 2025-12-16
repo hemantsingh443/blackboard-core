@@ -5,6 +5,7 @@ Provides abstract persistence interface with multiple backend implementations
 for distributed and serverless deployments.
 """
 
+import asyncio
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -132,9 +133,12 @@ class JSONFilePersistence:
         # Increment version and save
         state.version += 1
         
-        try:
+        def _write_file():
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(state.model_dump_json(indent=2))
+        
+        try:
+            await asyncio.to_thread(_write_file)
             logger.debug(f"Saved session {session_id} (v{state.version})")
         except Exception as e:
             raise PersistenceError(f"Failed to save session: {e}") from e
@@ -147,9 +151,12 @@ class JSONFilePersistence:
         if not path.exists():
             raise SessionNotFoundError(f"Session not found: {session_id}")
         
-        try:
+        def _read_file():
             with open(path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+                return json.load(f)
+        
+        try:
+            data = await asyncio.to_thread(_read_file)
             return Blackboard.model_validate(data)
         except json.JSONDecodeError as e:
             raise PersistenceError(f"Invalid JSON in session file: {e}") from e

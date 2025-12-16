@@ -1,5 +1,5 @@
 """
-Blackboard-Core SDK v1.0.1
+Blackboard-Core SDK v1.0.2
 
 A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems.
 
@@ -69,7 +69,7 @@ from .core import (
 # VERSION
 # =============================================================================
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 # =============================================================================
 # CORE PUBLIC API (__all__)

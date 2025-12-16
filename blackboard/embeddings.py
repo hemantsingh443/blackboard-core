@@ -334,3 +334,90 @@ def get_default_embedder() -> EmbeddingModel:
         return LocalEmbedder()
     except ImportError:
         return TFIDFEmbedder()
+
+
+# =============================================================================
+# Async Embedders (for non-blocking I/O)
+# =============================================================================
+
+class AsyncOpenAIEmbedder:
+    """
+    Async embeddings via OpenAI API.
+    
+    Uses AsyncOpenAI client for non-blocking operations.
+    Recommended for web servers and async applications.
+    
+    Requires: pip install openai
+    
+    Example:
+        embedder = AsyncOpenAIEmbedder(api_key="sk-...")
+        embedding = await embedder.embed_query_async("hello")
+    """
+    
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: str = "text-embedding-3-small",
+        dimensions: Optional[int] = None
+    ):
+        self.api_key = api_key
+        self.model = model
+        self.dimensions = dimensions
+        self._client = None
+    
+    def _get_client(self):
+        """Lazy-load the async OpenAI client."""
+        if self._client is None:
+            try:
+                import openai
+                if self.api_key:
+                    self._client = openai.AsyncOpenAI(api_key=self.api_key)
+                else:
+                    self._client = openai.AsyncOpenAI()
+            except ImportError:
+                raise ImportError(
+                    "openai is required for AsyncOpenAIEmbedder. "
+                    "Install with: pip install openai"
+                )
+        return self._client
+    
+    async def embed_documents_async(self, texts: List[str]) -> List[List[float]]:
+        """Embed multiple documents asynchronously."""
+        client = self._get_client()
+        
+        kwargs = {"input": texts, "model": self.model}
+        if self.dimensions:
+            kwargs["dimensions"] = self.dimensions
+        
+        response = await client.embeddings.create(**kwargs)
+        return [item.embedding for item in response.data]
+    
+    async def embed_query_async(self, text: str) -> List[float]:
+        """Embed a single query asynchronously."""
+        results = await self.embed_documents_async([text])
+        return results[0]
+    
+    # Sync fallback for EmbeddingModel protocol compatibility
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Sync wrapper (blocks event loop - prefer async version)."""
+        import asyncio
+        return asyncio.run(self.embed_documents_async(texts))
+    
+    def embed_query(self, text: str) -> List[float]:
+        """Sync wrapper (blocks event loop - prefer async version)."""
+        import asyncio
+        return asyncio.run(self.embed_query_async(text))
+
+
+def run_embedder_async(embedder: EmbeddingModel, text: str):
+    """
+    Run a sync embedder in a thread pool (non-blocking).
+    
+    Use this to avoid blocking the event loop with CPU-bound embedders.
+    
+    Example:
+        embedding = await run_embedder_async(LocalEmbedder(), "hello")
+    """
+    import asyncio
+    return asyncio.to_thread(embedder.embed_query, text)
+

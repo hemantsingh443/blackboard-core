@@ -206,7 +206,8 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         allow_json_fallback: bool = True,
         strict_tools: bool = False,
         auto_summarize: bool = False,
-        summarize_thresholds: Optional[Dict[str, int]] = None
+        summarize_thresholds: Optional[Dict[str, int]] = None,
+        supervisor_prompt: Optional[str] = None
     ):
         """
         Initialize the orchestrator.
@@ -227,6 +228,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             strict_tools: If True, validate tool definitions at startup and crash on errors
             auto_summarize: If True, automatically summarize context when thresholds exceeded
             summarize_thresholds: Custom thresholds for summarization
+            supervisor_prompt: Custom system prompt for the supervisor LLM
         """
         # Validate inputs
         if not workers:
@@ -252,6 +254,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             "feedback": 20,
             "steps": 50
         }
+        self.supervisor_prompt = supervisor_prompt or self.SUPERVISOR_SYSTEM_PROMPT
         self.persistence = None  # Set via set_persistence()
         
         # Check if LLM supports tool calling
@@ -892,7 +895,7 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
             worker_lines.append(line)
         worker_list = "\n".join(worker_lines)
         
-        system_prompt = self.SUPERVISOR_SYSTEM_PROMPT.format(worker_list=worker_list)
+        system_prompt = self.supervisor_prompt.format(worker_list=worker_list)
         
         full_prompt = f"{system_prompt}\n\n## Current State\n{context}\n\n## Your Decision (JSON only):"
         

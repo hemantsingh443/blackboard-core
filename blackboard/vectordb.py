@@ -4,6 +4,7 @@ Production-Grade Vector Database Backends
 Provides scalable vector storage for memory systems using external databases.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Protocol, runtime_checkable
 
@@ -112,11 +113,14 @@ class ChromaMemory(Memory):
     async def store(self, entry: MemoryEntry) -> str:
         collection = self._get_collection()
         
-        collection.add(
-            ids=[entry.id],
-            documents=[entry.content],
-            metadatas=[entry.metadata or {}]
-        )
+        def _add():
+            collection.add(
+                ids=[entry.id],
+                documents=[entry.content],
+                metadatas=[entry.metadata or {}]
+            )
+        
+        await asyncio.to_thread(_add)
         
         logger.debug(f"Stored entry {entry.id} in ChromaDB")
         return entry.id
@@ -136,7 +140,10 @@ class ChromaMemory(Memory):
         if filter:
             kwargs["where"] = filter
         
-        results = collection.query(**kwargs)
+        def _query():
+            return collection.query(**kwargs)
+        
+        results = await asyncio.to_thread(_query)
         
         search_results = []
         if results['ids'] and results['ids'][0]:
@@ -155,7 +162,10 @@ class ChromaMemory(Memory):
     async def retrieve(self, entry_id: str) -> Optional[MemoryEntry]:
         collection = self._get_collection()
         
-        results = collection.get(ids=[entry_id])
+        def _get():
+            return collection.get(ids=[entry_id])
+        
+        results = await asyncio.to_thread(_get)
         
         if results['ids']:
             return MemoryEntry(
@@ -169,8 +179,11 @@ class ChromaMemory(Memory):
     async def delete(self, entry_id: str) -> bool:
         collection = self._get_collection()
         
-        try:
+        def _delete():
             collection.delete(ids=[entry_id])
+        
+        try:
+            await asyncio.to_thread(_delete)
             return True
         except:
             return False
@@ -179,8 +192,11 @@ class ChromaMemory(Memory):
         """Clear all entries from the collection."""
         client = self._get_client()
         
-        try:
+        def _delete_collection():
             client.delete_collection(self.collection_name)
+        
+        try:
+            await asyncio.to_thread(_delete_collection)
             self._collection = None
             logger.info(f"Cleared ChromaDB collection: {self.collection_name}")
         except:
@@ -189,7 +205,7 @@ class ChromaMemory(Memory):
     async def count(self) -> int:
         """Get total number of entries."""
         collection = self._get_collection()
-        return collection.count()
+        return await asyncio.to_thread(collection.count)
 
 
 class HybridSearchMemory(Memory):
@@ -247,13 +263,15 @@ class HybridSearchMemory(Memory):
         # Get semantic results
         semantic_results = await self.vector_memory.search(query, k=k*2, filter=filter)
         
-        # Get BM25 results
+        # Build BM25 index if needed (CPU-bound, run in thread)
         if self._bm25 is None and self._documents:
-            self._build_bm25_index()
+            await asyncio.to_thread(self._build_bm25_index)
         
         if self._bm25 and self._documents:
             tokenized_query = query.lower().split()
-            bm25_scores = self._bm25.get_scores(tokenized_query)
+            
+            # BM25 scoring is CPU-bound
+            bm25_scores = await asyncio.to_thread(self._bm25.get_scores, tokenized_query)
             
             # Normalize BM25 scores
             max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1

@@ -16,12 +16,21 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("blackboard.hierarchy")
 
+# Maximum recursion depth to prevent infinite loops
+DEFAULT_MAX_DEPTH = 5
+
+
+class RecursionLimitError(Exception):
+    """Raised when sub-orchestrator recursion exceeds max_depth."""
+    pass
+
 
 class SubGoalInput(WorkerInput):
     """Input schema for sub-orchestrator workers."""
     sub_goal: str
     max_steps: int = 10
     context: Optional[str] = None
+    _depth: int = 0  # Internal: tracks current recursion depth
 
 
 class SubOrchestratorWorker(Worker):
@@ -66,6 +75,7 @@ class SubOrchestratorWorker(Worker):
         sub_workers: List[Worker],
         goal_template: str = "{sub_goal}",
         max_sub_steps: int = 10,
+        max_depth: int = DEFAULT_MAX_DEPTH,
         verbose: bool = False
     ):
         self.name = name
@@ -74,6 +84,7 @@ class SubOrchestratorWorker(Worker):
         self.sub_workers = sub_workers
         self.goal_template = goal_template
         self.max_sub_steps = max_sub_steps
+        self.max_depth = max_depth
         self.verbose = verbose
     
     async def run(
@@ -89,6 +100,17 @@ class SubOrchestratorWorker(Worker):
                 metadata={"error": "sub_goal is required"}
             )
         
+        # Check recursion depth
+        current_depth = getattr(inputs, '_depth', 0)
+        if current_depth >= self.max_depth:
+            logger.warning(f"[{self.name}] Max recursion depth ({self.max_depth}) reached")
+            return WorkerOutput(
+                metadata={
+                    "error": f"Recursion limit exceeded (depth={current_depth})",
+                    "max_depth": self.max_depth
+                }
+            )
+        
         # Format the sub-goal
         sub_goal = self.goal_template.format(
             sub_goal=inputs.sub_goal,
@@ -96,7 +118,7 @@ class SubOrchestratorWorker(Worker):
             context=inputs.context or ""
         )
         
-        logger.info(f"[{self.name}] Starting sub-orchestration: {sub_goal[:50]}...")
+        logger.info(f"[{self.name}] Starting sub-orchestration (depth={current_depth+1}): {sub_goal[:50]}...")
         
         # Create sub-orchestrator
         sub_orchestrator = Orchestrator(
@@ -191,12 +213,15 @@ class DelegatorWorker(Worker):
         name: str,
         description: str,
         llm: "LLMClient",
-        teams: Dict[str, List[Worker]]
+        teams: Dict[str, List[Worker]],
+        max_depth: int = DEFAULT_MAX_DEPTH
     ):
         self.name = name
         self.description = description
         self.llm = llm
         self.teams = teams
+        self.max_depth = max_depth
+        self._current_depth = 0
     
     async def run(
         self,
@@ -210,6 +235,17 @@ class DelegatorWorker(Worker):
                 metadata={"error": "inputs required with 'team' and 'task' fields"}
             )
         
+        # Check recursion depth
+        depth = getattr(inputs, '_depth', self._current_depth)
+        if depth >= self.max_depth:
+            logger.warning(f"[{self.name}] Max recursion depth ({self.max_depth}) reached")
+            return WorkerOutput(
+                metadata={
+                    "error": f"Recursion limit exceeded (depth={depth})",
+                    "max_depth": self.max_depth
+                }
+            )
+        
         # Get team and task from inputs
         team_name = getattr(inputs, 'team', None) or inputs.__dict__.get('team')
         task = getattr(inputs, 'task', None) or inputs.__dict__.get('task', inputs.instructions)
@@ -221,6 +257,8 @@ class DelegatorWorker(Worker):
                     "available_teams": list(self.teams.keys())
                 }
             )
+        
+        logger.info(f"[{self.name}] Delegating to team '{team_name}' (depth={depth+1})")
         
         # Create and run sub-orchestrator for the team
         sub_orchestrator = Orchestrator(

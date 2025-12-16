@@ -108,75 +108,82 @@ class TestToolDefinition:
 class TestSimpleVectorMemory:
     """Tests for simple vector memory."""
     
-    def test_add_and_search(self):
+    @pytest.mark.asyncio
+    async def test_add_and_search(self):
         """Test adding and searching memories."""
         memory = SimpleVectorMemory()
         
-        memory.add("User prefers Python 3.11")
-        memory.add("Database is PostgreSQL 15")
-        memory.add("Deployment target is AWS")
+        await memory.add("User prefers Python 3.11")
+        await memory.add("Database is PostgreSQL 15")
+        await memory.add("Deployment target is AWS")
         
-        results = memory.search("What Python version?", limit=2)
+        results = await memory.search("What Python version?", limit=2)
         
         assert len(results) > 0
         assert "Python" in results[0].entry.content
     
-    def test_search_relevance(self):
+    @pytest.mark.asyncio
+    async def test_search_relevance(self):
         """Test that search returns relevant results."""
         memory = SimpleVectorMemory()
         
-        memory.add("The user likes cats")
-        memory.add("Python is the preferred language")
-        memory.add("Database queries should be optimized")
+        await memory.add("The user likes cats")
+        await memory.add("Python is the preferred language")
+        await memory.add("Database queries should be optimized")
         
-        results = memory.search("programming language", limit=1)
+        results = await memory.search("programming language", limit=1)
         
         assert len(results) == 1
         assert "Python" in results[0].entry.content
     
-    def test_get_by_id(self):
+    @pytest.mark.asyncio
+    async def test_get_by_id(self):
         """Test getting memory by ID."""
         memory = SimpleVectorMemory()
         
-        entry = memory.add("Test content")
+        entry = await memory.add("Test content")
         
-        retrieved = memory.get(entry.id)
+        retrieved = await memory.get(entry.id)
         assert retrieved is not None
         assert retrieved.content == "Test content"
     
-    def test_delete(self):
+    @pytest.mark.asyncio
+    async def test_delete(self):
         """Test deleting a memory."""
         memory = SimpleVectorMemory()
         
-        entry = memory.add("To be deleted")
-        assert memory.delete(entry.id) is True
-        assert memory.get(entry.id) is None
+        entry = await memory.add("To be deleted")
+        assert await memory.delete(entry.id) is True
+        assert await memory.get(entry.id) is None
     
-    def test_clear(self):
+    @pytest.mark.asyncio
+    async def test_clear(self):
         """Test clearing all memories."""
         memory = SimpleVectorMemory()
         
-        memory.add("One")
-        memory.add("Two")
+        await memory.add("One")
+        await memory.add("Two")
         
-        count = memory.clear()
+        count = await memory.clear()
         
         assert count == 2
-        assert len(memory.get_all()) == 0
+        assert len(await memory.get_all()) == 0
     
-    def test_persistence(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_persistence(self, tmp_path):
         """Test persisting memories to disk."""
         path = tmp_path / "memory.json"
         
         # Create and populate
         memory1 = SimpleVectorMemory(persist_path=str(path))
-        memory1.add("Persistent memory")
+        await memory1.add("Persistent memory")
         
         # Load in new instance
         memory2 = SimpleVectorMemory(persist_path=str(path))
         
-        assert len(memory2.get_all()) == 1
-        assert memory2.get_all()[0].content == "Persistent memory"
+        all_memories = await memory2.get_all()
+        assert len(all_memories) == 1
+        assert all_memories[0].content == "Persistent memory"
 
 
 class TestMemoryWorker:
@@ -186,7 +193,7 @@ class TestMemoryWorker:
     async def test_memory_search(self):
         """Test memory search operation."""
         memory = SimpleVectorMemory()
-        memory.add("User prefers dark mode")
+        await memory.add("User prefers dark mode")
         
         worker = MemoryWorker(memory)
         state = Blackboard(goal="Test")
@@ -208,13 +215,13 @@ class TestMemoryWorker:
         output = await worker.run(state, inputs)
         
         assert output.has_artifact()
-        assert len(memory.get_all()) == 1
+        assert len(await memory.get_all()) == 1
     
     @pytest.mark.asyncio
     async def test_memory_explicit_operation(self):
         """Test that operation must be explicitly specified."""
         memory = SimpleVectorMemory()
-        memory.add("Some existing data")
+        await memory.add("Some existing data")
         
         worker = MemoryWorker(memory)
         state = Blackboard(goal="Test")
@@ -223,7 +230,7 @@ class TestMemoryWorker:
         inputs = MemoryInput(operation="add", content="User likes blue")
         output = await worker.run(state, inputs)
         
-        assert len(memory.get_all()) == 2  # Original + new
+        assert len(await memory.get_all()) == 2  # Original + new
 
 
 class TestAutoSummarization:
