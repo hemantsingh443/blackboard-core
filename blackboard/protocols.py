@@ -159,7 +159,9 @@ class WorkerRegistry:
         self._workers: Dict[str, Worker] = {}
     
     def register(self, worker: Worker) -> None:
-        """Register a worker. Raises if name already exists."""
+        """Register a worker. Raises if name already exists or is invalid."""
+        if not worker.name or not worker.name.strip():
+            raise ValueError(f"Worker must have a non-empty name: {worker}")
         if worker.name in self._workers:
             raise ValueError(f"Worker with name '{worker.name}' already registered")
         self._workers[worker.name] = worker

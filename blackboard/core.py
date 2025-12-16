@@ -204,6 +204,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         usage_tracker: Optional[UsageTracker] = None,
         use_tool_calling: bool = True,
         allow_json_fallback: bool = True,
+        strict_tools: bool = False,
         auto_summarize: bool = False,
         summarize_thresholds: Optional[Dict[str, int]] = None
     ):
@@ -223,9 +224,14 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             usage_tracker: Tracker for LLM token usage and costs
             use_tool_calling: If True, use native tool calling when LLM supports it
             allow_json_fallback: If False, raise error when tool calling fails instead of silently falling back
+            strict_tools: If True, validate tool definitions at startup and crash on errors
             auto_summarize: If True, automatically summarize context when thresholds exceeded
             summarize_thresholds: Custom thresholds for summarization
         """
+        # Validate inputs
+        if not workers:
+            raise ValueError("At least one worker must be provided")
+        
         self.llm = llm
         self.registry = WorkerRegistry()
         for worker in workers:
@@ -239,6 +245,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         self.usage_tracker = usage_tracker
         self.use_tool_calling = use_tool_calling
         self.allow_json_fallback = allow_json_fallback
+        self.strict_tools = strict_tools
         self.auto_summarize = auto_summarize
         self.summarize_thresholds = summarize_thresholds or {
             "artifacts": 10,
@@ -252,8 +259,19 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         # Cache tool definitions if tool calling is available
         self._tool_definitions: List[ToolDefinition] = []
         if self._supports_tool_calling and use_tool_calling:
-            self._tool_definitions = workers_to_tool_definitions(workers)
-            self._tool_definitions.extend([DONE_TOOL, FAIL_TOOL])
+            try:
+                self._tool_definitions = workers_to_tool_definitions(workers)
+                self._tool_definitions.extend([DONE_TOOL, FAIL_TOOL])
+                
+                # Validate tool definitions if strict mode
+                if strict_tools:
+                    self._validate_tool_definitions()
+            except Exception as e:
+                if strict_tools:
+                    raise ValueError(f"Tool definition error (strict_tools=True): {e}") from e
+                else:
+                    logger.warning(f"Tool definition error, tool calling disabled: {e}")
+                    self._supports_tool_calling = False
         
         # Initialize middleware stack
         self.middleware = MiddlewareStack()
@@ -286,8 +304,12 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             The final blackboard state
             
         Raises:
-            ValueError: If neither goal nor state is provided
+            ValueError: If neither goal nor state is provided, or max_steps < 1
         """
+        # Validate max_steps
+        if max_steps < 1:
+            raise ValueError(f"max_steps must be at least 1, got {max_steps}")
+        
         # Initialize or resume state
         if state is not None:
             # Resume from existing state
@@ -326,7 +348,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             step_ctx = StepContext(step_number=state.step_count, state=state)
             
             # Before step middleware hook
-            self.middleware.before_step(step_ctx)
+            await self.middleware.before_step(step_ctx)
             if step_ctx.skip_step:
                 logger.debug("Step skipped by middleware")
                 continue
@@ -349,7 +371,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             if decision.action == "done":
                 state.update_status(Status.DONE)
                 logger.info("Goal achieved!")
-                self.middleware.after_step(step_ctx)
+                await self.middleware.after_step(step_ctx)
                 await self._publish_event(EventType.STEP_COMPLETED, {
                     "step": state.step_count,
                     "action": "done"
@@ -359,7 +381,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             if decision.action == "fail":
                 state.update_status(Status.FAILED)
                 logger.warning("Goal failed")
-                self.middleware.after_step(step_ctx)
+                await self.middleware.after_step(step_ctx)
                 await self._publish_event(EventType.STEP_COMPLETED, {
                     "step": state.step_count,
                     "action": "fail"
@@ -375,7 +397,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
                 await self._execute_workers_parallel(state, decision.calls)
             
             # After step middleware hook
-            self.middleware.after_step(step_ctx)
+            await self.middleware.after_step(step_ctx)
             
             # Check if middleware skipped further execution
             if step_ctx.skip_step:
@@ -970,6 +992,31 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         ]
         
         return any(pattern in error_str for pattern in dependency_patterns)
+
+    def _validate_tool_definitions(self) -> None:
+        """
+        Validate all tool definitions have valid schemas.
+        
+        Raises:
+            ValueError: If any tool definition is invalid
+        """
+        for tool in self._tool_definitions:
+            # Validate name
+            if not tool.name or not tool.name.strip():
+                raise ValueError(f"Tool has empty name: {tool}")
+            
+            # Validate each parameter
+            for param in tool.parameters:
+                if not param.name or not param.name.strip():
+                    raise ValueError(f"Tool '{tool.name}' has parameter with empty name")
+                if not param.type:
+                    raise ValueError(f"Tool '{tool.name}' parameter '{param.name}' has no type")
+            
+            # Try to generate OpenAI format to catch schema issues
+            try:
+                tool.to_openai_format()
+            except Exception as e:
+                raise ValueError(f"Tool '{tool.name}' has invalid schema: {e}")
 
 
 # Convenience functions

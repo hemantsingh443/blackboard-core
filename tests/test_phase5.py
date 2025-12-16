@@ -231,6 +231,7 @@ class TestAutoSummarization:
     
     def test_should_trigger_on_threshold(self):
         """Test that summarization triggers on threshold."""
+        import asyncio
         
         class MockLLM:
             call_count = 0
@@ -256,13 +257,15 @@ class TestAutoSummarization:
         from blackboard.middleware import StepContext
         ctx = StepContext(step_number=10, state=state)
         
-        summarizer.after_step(ctx)
+        # Now async
+        asyncio.run(summarizer.after_step(ctx))
         
         assert MockLLM.call_count == 1
         assert state.context_summary != ""
     
     def test_compacts_after_summarization(self):
         """Test that artifacts are compacted after summarization."""
+        import asyncio
         
         class MockLLM:
             def generate(self, prompt):
@@ -283,7 +286,8 @@ class TestAutoSummarization:
         from blackboard.middleware import StepContext
         ctx = StepContext(step_number=10, state=state)
         
-        summarizer.after_step(ctx)
+        # Now async
+        asyncio.run(summarizer.after_step(ctx))
         
         # Should have compacted to keep_recent_artifacts
         assert len(state.artifacts) == 2

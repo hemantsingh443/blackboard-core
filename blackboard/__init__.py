@@ -1,129 +1,179 @@
 """
-Blackboard-Core SDK
+Blackboard-Core SDK v1.0
 
-A Python SDK implementing the Blackboard Pattern for centralized state multi-agent systems.
+A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems.
 
-Quick Start:
-    from blackboard import Orchestrator, Worker, WorkerOutput, Artifact, Blackboard
+## Quick Start
+
+```python
+from blackboard import Orchestrator, Worker, WorkerOutput, Artifact, Blackboard
+
+class Writer(Worker):
+    name = "Writer"
+    description = "Generates content"
     
-    class MyWriter(Worker):
-        name = "Writer"
-        description = "Generates text content"
-        
-        async def run(self, state: Blackboard, inputs=None) -> WorkerOutput:
-            return WorkerOutput(
-                artifact=Artifact(type="text", content="Hello!", creator=self.name)
-            )
-    
-    orchestrator = Orchestrator(llm=my_llm_client, workers=[MyWriter()])
-    result = await orchestrator.run(goal="Write a greeting")
-    
-    # Save and resume
-    result.save_to_json("session.json")
-    resumed = Blackboard.load_from_json("session.json")
+    async def run(self, state, inputs=None):
+        return WorkerOutput(
+            artifact=Artifact(type="text", content="Hello!", creator=self.name)
+        )
+
+orchestrator = Orchestrator(llm=my_llm, workers=[Writer()])
+result = await orchestrator.run(goal="Write a greeting")
+```
+
+## Namespace Organization
+
+Core API (always stable):
+- `from blackboard import Orchestrator, Worker, Blackboard, Artifact, Feedback`
+
+Advanced features (opt-in submodules):
+- `from blackboard.middleware import BudgetMiddleware, HumanApprovalMiddleware`
+- `from blackboard.memory import SimpleVectorMemory, MemoryWorker`
+- `from blackboard.tools import ToolCallingLLMClient`
 """
 
-from .state import Artifact, Feedback, Blackboard, Status
-from .protocols import Worker, WorkerOutput, WorkerRegistry, WorkerInput
-from .core import (
-    Orchestrator, LLMClient, SupervisorDecision, WorkerCall, 
-    run_blackboard, run_blackboard_sync, LLMResult
-)
-from .events import EventBus, Event, EventType, get_event_bus, reset_event_bus
-from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, NO_RETRY, is_transient_error
-from .middleware import (
-    Middleware, MiddlewareStack, StepContext, WorkerContext,
-    BudgetMiddleware, LoggingMiddleware, HumanApprovalMiddleware, AutoSummarizationMiddleware,
-    ApprovalRequired
-)
-from .usage import LLMResponse, LLMUsage, UsageTracker, UsageRecord, MODEL_PRICING, create_openai_tracker
-from .tools import (
-    ToolDefinition, ToolParameter, ToolCall, ToolCallResponse,
-    ToolCallingLLMClient, worker_to_tool_definition, workers_to_tool_definitions,
-    DONE_TOOL, FAIL_TOOL
-)
-from .memory import (
-    Memory, MemoryEntry, SearchResult, SimpleVectorMemory, MemoryWorker, MemoryInput
-)
-from .embeddings import (
-    EmbeddingModel, NoOpEmbedder, TFIDFEmbedder, LocalEmbedder, OpenAIEmbedder,
-    cosine_similarity, get_default_embedder
+# =============================================================================
+# CORE API - The essential, stable public interface
+# =============================================================================
+
+# State models
+from .state import (
+    Blackboard,
+    Artifact,
+    Feedback,
+    Status,
+    StateConflictError,
 )
 
-__version__ = "0.5.1"
+# Worker protocol
+from .protocols import (
+    Worker,
+    WorkerOutput,
+    WorkerInput,
+    WorkerRegistry,
+)
+
+# Orchestrator
+from .core import (
+    Orchestrator,
+    LLMClient,
+    run_blackboard,
+    run_blackboard_sync,
+)
+
+# =============================================================================
+# VERSION
+# =============================================================================
+
+__version__ = "1.0.0"
+
+# =============================================================================
+# CORE PUBLIC API (__all__)
+# Only the most essential items - users import advanced features from submodules
+# =============================================================================
 
 __all__ = [
-    # State models
-    "Artifact",
-    "Feedback", 
+    # State (stable)
     "Blackboard",
+    "Artifact",
+    "Feedback",
     "Status",
-    # Worker protocol
+    "StateConflictError",
+    # Worker (stable)
     "Worker",
     "WorkerOutput",
-    "WorkerRegistry",
     "WorkerInput",
-    # Orchestrator
+    "WorkerRegistry",
+    # Orchestrator (stable)
     "Orchestrator",
     "LLMClient",
-    "SupervisorDecision",
-    "WorkerCall",
     "run_blackboard",
     "run_blackboard_sync",
-    # LLM Response
-    "LLMResult",
-    "LLMResponse",
-    "LLMUsage",
-    # Events
-    "EventBus",
-    "Event",
-    "EventType",
-    "get_event_bus",
-    "reset_event_bus",
-    # Retry
-    "RetryPolicy",
-    "retry_with_backoff",
-    "DEFAULT_RETRY_POLICY",
-    "NO_RETRY",
-    "is_transient_error",
-    # Middleware
-    "Middleware",
-    "MiddlewareStack",
-    "StepContext",
-    "WorkerContext",
-    "BudgetMiddleware",
-    "LoggingMiddleware",
-    "HumanApprovalMiddleware",
-    "AutoSummarizationMiddleware",
-    "ApprovalRequired",
-    # Usage Tracking
-    "UsageTracker",
-    "UsageRecord",
-    "MODEL_PRICING",
-    "create_openai_tracker",
-    # Tool Calling
-    "ToolDefinition",
-    "ToolParameter",
-    "ToolCall",
-    "ToolCallResponse",
-    "ToolCallingLLMClient",
-    "worker_to_tool_definition",
-    "workers_to_tool_definitions",
-    "DONE_TOOL",
-    "FAIL_TOOL",
-    # Memory
-    "Memory",
-    "MemoryEntry",
-    "SearchResult",
-    "SimpleVectorMemory",
-    "MemoryWorker",
-    "MemoryInput",
-    # Embeddings
-    "EmbeddingModel",
-    "NoOpEmbedder",
-    "TFIDFEmbedder",
-    "LocalEmbedder",
-    "OpenAIEmbedder",
-    "cosine_similarity",
-    "get_default_embedder",
+    # Version
+    "__version__",
 ]
+
+# =============================================================================
+# CONVENIENCE RE-EXPORTS (for backward compatibility)
+# Users should migrate to submodule imports for advanced features
+# =============================================================================
+
+# These are available at the top level but NOT in __all__
+# This way they work but don't pollute IDE autocomplete
+
+# Middleware (prefer: from blackboard.middleware import ...)
+from .middleware import (
+    Middleware,
+    MiddlewareStack,
+    StepContext,
+    WorkerContext,
+    BudgetMiddleware,
+    LoggingMiddleware,
+    HumanApprovalMiddleware,
+    AutoSummarizationMiddleware,
+    ApprovalRequired,
+)
+
+# Events (prefer: from blackboard.events import ...)
+from .events import (
+    EventBus,
+    Event,
+    EventType,
+    get_event_bus,
+    reset_event_bus,
+)
+
+# Retry (prefer: from blackboard.retry import ...)
+from .retry import (
+    RetryPolicy,
+    retry_with_backoff,
+    DEFAULT_RETRY_POLICY,
+    NO_RETRY,
+    is_transient_error,
+)
+
+# Usage tracking (prefer: from blackboard.usage import ...)
+from .usage import (
+    UsageTracker,
+    UsageRecord,
+    LLMResponse,
+    LLMUsage,
+    create_openai_tracker,
+)
+
+# Tool calling (prefer: from blackboard.tools import ...)
+from .tools import (
+    ToolDefinition,
+    ToolParameter,
+    ToolCall,
+    ToolCallResponse,
+    ToolCallingLLMClient,
+    worker_to_tool_definition,
+    workers_to_tool_definitions,
+    DONE_TOOL,
+    FAIL_TOOL,
+)
+
+# Memory (prefer: from blackboard.memory import ...)
+from .memory import (
+    Memory,
+    MemoryEntry,
+    SearchResult,
+    SimpleVectorMemory,
+    MemoryWorker,
+    MemoryInput,
+)
+
+# Embeddings (prefer: from blackboard.embeddings import ...)
+from .embeddings import (
+    EmbeddingModel,
+    NoOpEmbedder,
+    TFIDFEmbedder,
+    LocalEmbedder,
+    OpenAIEmbedder,
+    cosine_similarity,
+    get_default_embedder,
+)
+
+# Internal re-exports for advanced usage
+from .core import SupervisorDecision, WorkerCall, LLMResult

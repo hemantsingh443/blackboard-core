@@ -100,17 +100,40 @@ class Blackboard(BaseModel):
     # Persistence Methods
     # =========================================================================
     
-    def save_to_json(self, path: Union[str, Path]) -> None:
+    def save_to_json(self, path: Union[str, Path], skip_version_check: bool = False) -> None:
         """
         Save the blackboard state to a JSON file.
         
+        Uses optimistic locking to prevent data loss from concurrent updates.
+        
         Args:
             path: Path to save the JSON file
+            skip_version_check: If True, skip version check (use with caution)
+            
+        Raises:
+            StateConflictError: If disk version is newer than memory version
             
         Example:
             state.save_to_json("session_001.json")
         """
         path = Path(path)
+        
+        # Optimistic locking: check if disk version is newer
+        if not skip_version_check and path.exists():
+            try:
+                existing = Blackboard.load_from_json(path)
+                if existing.version > self.version:
+                    raise StateConflictError(
+                        f"State conflict: disk version ({existing.version}) is newer than "
+                        f"memory version ({self.version}). Another process may have updated the state."
+                    )
+            except StateConflictError:
+                raise  # Re-raise conflict errors
+            except Exception:
+                pass  # If we can't load, proceed with save
+        
+        # Increment version and save
+        self.version += 1
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'w', encoding='utf-8') as f:
             f.write(self.model_dump_json(indent=2))
