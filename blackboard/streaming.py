@@ -6,7 +6,7 @@ Provides protocols and utilities for token-by-token streaming from LLMs.
 
 import asyncio
 import logging
-from typing import AsyncIterator, Callable, Optional, Protocol, runtime_checkable, Union
+from typing import Any, AsyncIterator, Callable, Coroutine, Optional, Protocol, runtime_checkable, Union
 
 from .events import Event, EventType, EventBus
 
@@ -178,7 +178,7 @@ class BufferedStream:
 
 
 def wrap_non_streaming(
-    generate_fn: Callable[[str], Union[str, asyncio.coroutines]]
+    generate_fn: Callable[[str], Union[str, Coroutine[Any, Any, str]]]
 ) -> Callable[[str], AsyncIterator[str]]:
     """
     Wrap a non-streaming generate function to return a fake stream.
