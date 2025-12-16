@@ -1,5 +1,5 @@
 """
-Blackboard-Core SDK v1.0
+Blackboard-Core SDK v1.0.1
 
 A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems.
 
@@ -28,8 +28,12 @@ Core API (always stable):
 
 Advanced features (opt-in submodules):
 - `from blackboard.middleware import BudgetMiddleware, HumanApprovalMiddleware`
-- `from blackboard.memory import SimpleVectorMemory, MemoryWorker`
-- `from blackboard.tools import ToolCallingLLMClient`
+- `from blackboard.persistence import RedisPersistence, JSONFilePersistence`
+- `from blackboard.hierarchy import SubOrchestratorWorker`
+- `from blackboard.streaming import StreamingLLMClient`
+- `from blackboard.vectordb import ChromaMemory`
+- `from blackboard.evals import Evaluator, LLMJudge`
+- `from blackboard.sandbox import SubprocessSandbox`
 """
 
 # =============================================================================
@@ -65,7 +69,7 @@ from .core import (
 # VERSION
 # =============================================================================
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 # =============================================================================
 # CORE PUBLIC API (__all__)

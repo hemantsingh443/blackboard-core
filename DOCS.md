@@ -367,7 +367,7 @@ orchestrator = Orchestrator(
 
 ## Persistence
 
-### Save and Load
+### Save and Load (File-Based)
 
 ```python
 # Save state
@@ -378,6 +378,46 @@ state = Blackboard.load_from_json("session.json")
 
 # Resume
 await orchestrator.run(state=state)
+```
+
+### Distributed Persistence (v1.0.1)
+
+For serverless and multi-container deployments:
+
+```python
+from blackboard.persistence import RedisPersistence, JSONFilePersistence
+
+# Redis backend (requires: pip install blackboard-core[redis])
+persistence = RedisPersistence(
+    redis_url="redis://localhost:6379",
+    prefix="myapp:",
+    ttl=86400  # Optional: expire after 24 hours
+)
+
+# Set on orchestrator
+orchestrator.set_persistence(persistence)
+
+# Save and resume sessions
+await persistence.save(state, "session-123")
+state = await persistence.load("session-123")
+
+# List all sessions
+sessions = await persistence.list_sessions()
+```
+
+### Pause/Resume (v1.0.1)
+
+Handle long-running tasks with human approval:
+
+```python
+# Pause and save state
+await orchestrator.pause(state, "session-123", reason="Needs approval")
+
+# Later, resume with user input
+result = await orchestrator.resume(
+    "session-123",
+    user_input={"approved": True}
+)
 ```
 
 ### Optimistic Locking
@@ -393,6 +433,146 @@ except StateConflictError:
     # Another process updated the file
     # Reload and merge changes
     pass
+```
+
+---
+
+## Sandbox Code Execution (v1.0.1)
+
+Safely execute LLM-generated code:
+
+```python
+from blackboard.sandbox import SubprocessSandbox, DockerSandbox
+
+# Lightweight isolation
+sandbox = SubprocessSandbox(timeout=30)
+result = await sandbox.execute("print('hello')")
+print(result.stdout)  # "hello"
+
+# Full isolation (requires Docker)
+docker_sandbox = DockerSandbox(
+    memory_limit="256m",
+    network_disabled=True
+)
+result = await docker_sandbox.execute(untrusted_code)
+```
+
+---
+
+## Hierarchical Orchestration (v1.0.1)
+
+Delegate complex tasks to sub-teams:
+
+```python
+from blackboard.hierarchy import SubOrchestratorWorker
+
+research_team = SubOrchestratorWorker(
+    name="ResearchTeam",
+    description="Researches topics using specialists",
+    llm=my_llm,
+    sub_workers=[WebScraper(), Summarizer(), FactChecker()],
+    goal_template="Research: {sub_goal}"
+)
+
+# Main orchestrator delegates to team
+orchestrator = Orchestrator(
+    llm=my_llm,
+    workers=[Writer(), research_team]
+)
+```
+
+---
+
+## Streaming (v1.0.1)
+
+Token-by-token streaming for responsive UIs:
+
+```python
+from blackboard.streaming import StreamingLLMClient, BufferedStream
+
+class MyStreamingLLM(StreamingLLMClient):
+    async def generate_stream(self, prompt):
+        async for token in openai_stream(prompt):
+            yield token
+
+# Collect and emit events
+from blackboard.streaming import StreamCollector
+
+collector = StreamCollector(event_bus, source="supervisor")
+response = await collector.collect(llm.generate_stream(prompt))
+```
+
+---
+
+## Production Vector DB (v1.0.1)
+
+Scalable memory with ChromaDB:
+
+```python
+from blackboard.vectordb import ChromaMemory, HybridSearchMemory
+
+# ChromaDB backend (requires: pip install blackboard-core[chroma])
+memory = ChromaMemory(
+    collection_name="agent_memory",
+    persist_directory="./chroma_data"
+)
+
+# Hybrid search (semantic + keyword)
+hybrid = HybridSearchMemory(memory, alpha=0.7)
+results = await hybrid.search("AI safety research", k=10)
+```
+
+---
+
+## Evaluation Framework (v1.0.1)
+
+Test and score agent performance:
+
+```python
+from blackboard.evals import Evaluator, LLMJudge, RuleBasedJudge, EvalCase
+
+# LLM-based judging
+judge = LLMJudge(my_llm, threshold=0.7)
+
+# Or rule-based
+judge = RuleBasedJudge([
+    ("has_artifacts", lambda bb: len(bb.artifacts) > 0),
+    ("is_done", lambda bb: bb.status == Status.DONE),
+])
+
+# Run evaluation
+evaluator = Evaluator(orchestrator, judge)
+report = await evaluator.run([
+    EvalCase(id="1", goal="Write a haiku", expected_criteria=["Has 3 lines"]),
+    EvalCase(id="2", goal="Summarize article", expected_criteria=["Under 100 words"]),
+])
+
+print(f"Pass rate: {report.pass_rate:.1%}")
+```
+
+---
+
+## Dynamic Worker Loading (v1.0.1)
+
+Load heavy workers on-demand:
+
+```python
+from blackboard.protocols import WorkerFactory, LazyWorkerRegistry
+
+class MyFactory:
+    def get_worker(self, name):
+        if name == "DataAnalyzer":
+            from .heavy import DataAnalyzer  # Lazy import
+            return DataAnalyzer()
+        return None
+    
+    def list_available(self):
+        return ["DataAnalyzer", "ImageProcessor"]
+    
+    def get_description(self, name):
+        return "Analyzes data" if name == "DataAnalyzer" else "Processes images"
+
+registry = LazyWorkerRegistry(factory=MyFactory())
 ```
 
 ---

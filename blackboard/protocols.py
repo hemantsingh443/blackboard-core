@@ -6,7 +6,7 @@ The "Contract" that any agent must follow to participate in the blackboard syste
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Type, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Type, TYPE_CHECKING, Protocol
 
 from pydantic import BaseModel
 
@@ -201,3 +201,104 @@ class WorkerRegistry:
     
     def __len__(self) -> int:
         return len(self._workers)
+
+
+class WorkerFactory(Protocol):
+    """
+    Protocol for dynamic worker loading.
+    
+    Use this to load workers on-demand instead of at startup.
+    Useful for heavy workers with large dependencies.
+    
+    Example:
+        class MyWorkerFactory:
+            def get_worker(self, name: str) -> Optional[Worker]:
+                if name == "DataAnalyzer":
+                    # Heavy imports only when needed
+                    from .heavy_workers import DataAnalyzer
+                    return DataAnalyzer()
+                return None
+            
+            def list_available(self) -> List[str]:
+                return ["DataAnalyzer", "ImageProcessor"]
+    """
+    
+    def get_worker(self, name: str) -> Optional[Worker]:
+        """Get a worker by name, loading it if necessary."""
+        ...
+    
+    def list_available(self) -> List[str]:
+        """List all worker names that can be loaded."""
+        ...
+    
+    def get_description(self, name: str) -> str:
+        """Get description for a worker without loading it."""
+        ...
+
+
+class LazyWorkerRegistry(WorkerRegistry):
+    """
+    Worker registry with lazy loading support.
+    
+    Workers are loaded from a factory only when first requested.
+    
+    Args:
+        factory: WorkerFactory for loading workers on demand
+        preload: List of worker names to load immediately
+        
+    Example:
+        factory = MyWorkerFactory()
+        registry = LazyWorkerRegistry(factory, preload=["Writer", "Critic"])
+        
+        # DataAnalyzer loaded only when first called
+        worker = registry.get("DataAnalyzer")
+    """
+    
+    def __init__(
+        self, 
+        factory: Optional[WorkerFactory] = None,
+        preload: Optional[List[str]] = None
+    ):
+        super().__init__()
+        self._factory = factory
+        self._factory_descriptions: Dict[str, str] = {}
+        
+        # Load factory descriptions if available
+        if factory:
+            for name in factory.list_available():
+                self._factory_descriptions[name] = factory.get_description(name)
+        
+        # Preload specified workers
+        if preload and factory:
+            for name in preload:
+                worker = factory.get_worker(name)
+                if worker:
+                    self.register(worker)
+    
+    def get(self, name: str) -> Optional[Worker]:
+        """Get a worker, loading from factory if needed."""
+        # Check if already loaded
+        worker = super().get(name)
+        if worker:
+            return worker
+        
+        # Try to load from factory
+        if self._factory and name in self._factory_descriptions:
+            worker = self._factory.get_worker(name)
+            if worker:
+                self.register(worker)
+                return worker
+        
+        return None
+    
+    def list_workers(self) -> Dict[str, str]:
+        """Return all workers including not-yet-loaded ones."""
+        result = super().list_workers()
+        # Add factory workers that haven't been loaded
+        for name, desc in self._factory_descriptions.items():
+            if name not in result:
+                result[name] = desc
+        return result
+    
+    def __contains__(self, name: str) -> bool:
+        return super().__contains__(name) or name in self._factory_descriptions

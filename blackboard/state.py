@@ -93,6 +93,7 @@ class Blackboard(BaseModel):
     history: List[Dict[str, Any]] = Field(default_factory=list, description="Execution history log")
     max_history: int = Field(default=1000, description="Max history entries (ring buffer, prevents OOM)")
     context_summary: str = Field(default="", description="Summary of earlier context (for long sessions)")
+    pending_input: Optional[Dict[str, Any]] = Field(default=None, description="Pending user input for resume")
 
     model_config = {"extra": "allow"}
 

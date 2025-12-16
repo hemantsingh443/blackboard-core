@@ -252,6 +252,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             "feedback": 20,
             "steps": 50
         }
+        self.persistence = None  # Set via set_persistence()
         
         # Check if LLM supports tool calling
         self._supports_tool_calling = isinstance(llm, ToolCallingLLMClient)
@@ -641,6 +642,97 @@ Each worker reads state at call time - workers will NOT see other workers' resul
     ) -> Blackboard:
         """Synchronous wrapper for run()."""
         return asyncio.run(self.run(goal=goal, state=state, max_steps=max_steps))
+
+    def set_persistence(self, persistence) -> None:
+        """
+        Set the persistence layer for save/resume.
+        
+        Args:
+            persistence: PersistenceLayer implementation
+            
+        Example:
+            from blackboard.persistence import RedisPersistence
+            orchestrator.set_persistence(RedisPersistence("redis://localhost"))
+        """
+        self.persistence = persistence
+
+    async def pause(
+        self, 
+        state: Blackboard, 
+        session_id: str,
+        reason: str = "Awaiting input"
+    ) -> None:
+        """
+        Pause execution and save state for later resume.
+        
+        Args:
+            state: Current blackboard state
+            session_id: Session ID for persistence
+            reason: Reason for pause (stored in metadata)
+            
+        Example:
+            await orchestrator.pause(state, "session-123", reason="Needs approval")
+        """
+        if not self.persistence:
+            raise RuntimeError("No persistence layer configured. Use set_persistence() first.")
+        
+        state.update_status(Status.PAUSED)
+        state.metadata["pause_reason"] = reason
+        
+        await self.persistence.save(state, session_id)
+        
+        await self._publish_event(EventType.ORCHESTRATOR_PAUSED, {
+            "session_id": session_id,
+            "reason": reason,
+            "step": state.step_count
+        })
+
+    async def resume(
+        self,
+        session_id: str,
+        user_input: Optional[Dict[str, Any]] = None,
+        max_steps: int = 20
+    ) -> Blackboard:
+        """
+        Resume a paused session.
+        
+        Args:
+            session_id: Session ID to resume
+            user_input: Optional user-provided input to inject
+            max_steps: Maximum steps to run
+            
+        Returns:
+            Final blackboard state
+            
+        Example:
+            result = await orchestrator.resume(
+                "session-123",
+                user_input={"approved": True}
+            )
+        """
+        if not self.persistence:
+            raise RuntimeError("No persistence layer configured. Use set_persistence() first.")
+        
+        # Load state
+        state = await self.persistence.load(session_id)
+        
+        await self._publish_event(EventType.ORCHESTRATOR_RESUMED, {
+            "session_id": session_id,
+            "step": state.step_count
+        })
+        
+        # Inject user input if provided
+        if user_input:
+            state.pending_input = user_input
+            state.metadata["user_input_received"] = True
+        
+        # Clear pause status
+        if state.status == Status.PAUSED:
+            state.update_status(Status.GENERATING)
+        
+        # Continue execution
+        return await self.run(state=state, max_steps=max_steps)
+
 
     async def _auto_summarize(self, state: Blackboard) -> None:
         """Automatically summarize context when thresholds are exceeded."""

@@ -19,6 +19,8 @@ class EventType(str, Enum):
     # Orchestrator events
     ORCHESTRATOR_STARTED = "orchestrator_started"
     ORCHESTRATOR_COMPLETED = "orchestrator_completed"
+    ORCHESTRATOR_PAUSED = "orchestrator_paused"
+    ORCHESTRATOR_RESUMED = "orchestrator_resumed"
     STEP_STARTED = "step_started"
     STEP_COMPLETED = "step_completed"
     
@@ -36,6 +38,11 @@ class EventType(str, Enum):
     # Persistence events
     STATE_SAVED = "state_saved"
     STATE_LOADED = "state_loaded"
+    
+    # Streaming events
+    STREAM_START = "stream_start"
+    STREAM_TOKEN = "stream_token"
+    STREAM_END = "stream_end"
 
 
 @dataclass

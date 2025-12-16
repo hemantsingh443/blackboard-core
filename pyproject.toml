@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackboard-core"
-version = "1.0.0"
+version = "1.0.1"
 description = "A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -35,6 +35,20 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-asyncio>=0.23.0",
+]
+redis = [
+    "redis>=5.0.0",
+]
+chroma = [
+    "chromadb>=0.4.0",
+]
+hybrid = [
+    "rank-bm25>=0.2.2",
+]
+all = [
+    "redis>=5.0.0",
+    "chromadb>=0.4.0",
+    "rank-bm25>=0.2.2",
 ]
 
 [project.urls]
