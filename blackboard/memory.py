@@ -104,6 +104,11 @@ class Memory(ABC):
         """Clear all memories. Returns count of deleted entries."""
         pass
     
+    @abstractmethod
+    async def count(self) -> int:
+        """Return total number of memory entries."""
+        pass
+    
     async def get_all(self) -> List[MemoryEntry]:
         """Get all memories (optional, may not scale)."""
         raise NotImplementedError("get_all not implemented for this memory backend")
@@ -245,6 +250,10 @@ class SimpleVectorMemory(Memory):
     async def get_all(self) -> List[MemoryEntry]:
         """Get all memories."""
         return list(self._memories.values())
+    
+    async def count(self) -> int:
+        """Return total number of memory entries."""
+        return len(self._memories)
     
     def _save(self) -> None:
         """Persist memories to disk."""

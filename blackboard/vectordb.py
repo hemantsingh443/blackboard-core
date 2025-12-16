@@ -327,3 +327,7 @@ class HybridSearchMemory(Memory):
         await self.vector_memory.clear()
         self._documents.clear()
         self._bm25 = None
+    
+    async def count(self) -> int:
+        """Return total number of memory entries."""
+        return await self.vector_memory.count()

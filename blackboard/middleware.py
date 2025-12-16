@@ -469,3 +469,81 @@ Provide a 2-3 paragraph summary that captures the essential context:'''
             import logging
             logging.getLogger("blackboard.middleware").warning(f"Summarization failed: {e}")
 
+
+class ConsoleLoggingMiddleware(Middleware):
+    """
+    Prints colored events to stdout for easy observability.
+    
+    No logging configuration required - just add to middleware stack.
+    
+    Args:
+        show_state: If True, print full state (verbose). Default: False
+        use_colors: If True, use ANSI colors. Default: True
+        
+    Example:
+        orchestrator = Orchestrator(
+            llm=my_llm,
+            workers=[...],
+            middleware=[ConsoleLoggingMiddleware()]
+        )
+    """
+    
+    # ANSI color codes
+    COLORS = {
+        "reset": "\033[0m",
+        "bold": "\033[1m",
+        "dim": "\033[2m",
+        "green": "\033[32m",
+        "yellow": "\033[33m",
+        "blue": "\033[34m",
+        "magenta": "\033[35m",
+        "cyan": "\033[36m",
+        "red": "\033[31m",
+    }
+    
+    def __init__(self, show_state: bool = False, use_colors: bool = True):
+        self.show_state = show_state
+        self.use_colors = use_colors
+    
+    def _c(self, color: str, text: str) -> str:
+        """Apply color if enabled."""
+        if self.use_colors:
+            return f"{self.COLORS.get(color, '')}{text}{self.COLORS['reset']}"
+        return text
+    
+    async def before_step(self, ctx: "StepContext") -> None:
+        step = ctx.step_number
+        status = ctx.state.status.value if ctx.state.status else "unknown"
+        print(f"\n{self._c('bold', '━' * 50)}")
+        print(f"{self._c('cyan', '▶ STEP')} {self._c('bold', str(step))} | Status: {self._c('yellow', status)}")
+        print(f"{self._c('dim', 'Goal:')} {ctx.state.goal[:60]}..." if len(ctx.state.goal) > 60 else f"{self._c('dim', 'Goal:')} {ctx.state.goal}")
+    
+    async def after_step(self, ctx: "StepContext") -> None:
+        if ctx.decision:
+            action = ctx.decision.action
+            if action == "call":
+                workers = ", ".join(ctx.decision.workers or [])
+                print(f"{self._c('green', '✓ Decision:')} call [{self._c('magenta', workers)}]")
+            elif action == "done":
+                print(f"{self._c('green', '✓ Decision:')} {self._c('bold', 'DONE')}")
+            elif action == "fail":
+                print(f"{self._c('red', '✗ Decision:')} FAIL - {ctx.decision.reason}")
+            else:
+                print(f"{self._c('yellow', '? Decision:')} {action}")
+        
+        if self.show_state:
+            print(f"{self._c('dim', 'Artifacts:')} {len(ctx.state.artifacts)} | {self._c('dim', 'Feedback:')} {len(ctx.state.feedback)}")
+    
+    async def before_worker(self, ctx: "WorkerContext") -> None:
+        worker_name = ctx.worker.name
+        instructions = ctx.call.instructions[:50] + "..." if len(ctx.call.instructions) > 50 else ctx.call.instructions
+        print(f"  {self._c('blue', '→')} {self._c('bold', worker_name)}: {self._c('dim', instructions)}")
+    
+    async def after_worker(self, ctx: "WorkerContext") -> None:
+        worker_name = ctx.worker.name
+        if ctx.error:
+            print(f"  {self._c('red', '✗')} {worker_name} error: {ctx.error}")
+        elif ctx.modified_output and ctx.modified_output.has_artifact():
+            print(f"  {self._c('green', '✓')} {worker_name} created artifact: {ctx.modified_output.artifact.type}")
+        else:
+            print(f"  {self._c('green', '✓')} {worker_name} completed")
