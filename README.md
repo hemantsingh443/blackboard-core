@@ -12,15 +12,15 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      ORCHESTRATOR                            │
+│                       ORCHESTRATOR                          │
 │  ┌─────────────┐    ┌──────────────────────────────────┐    │
-│  │ Supervisor  │───▶│           BLACKBOARD              │    │
-│  │    (LLM)    │    │  • Goal      • Artifacts          │    │
-│  └─────────────┘    │  • Status    • Feedback           │    │
-│         │           │  • History   • Metadata           │    │
+│  │  Supervisor │──▶│          BLACKBOARD              │    │
+│  │    (LLM)    │    │  • Goal      • Artifacts         │    │
+│  └─────────────┘    │  • Status    • Feedback          │    │
+│         │           │  • History   • Metadata          │    │
 │         ▼           └──────────────────────────────────┘    │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │                     WORKERS                          │    │
+│  │                       WORKERS                       │    │
 │  │  [Writer]  [Critic]  [Refiner]  [Researcher]  ...   │    │
 │  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
