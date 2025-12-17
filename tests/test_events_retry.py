@@ -3,8 +3,8 @@
 import pytest
 import asyncio
 
-from blackboard import EventBus, Event, EventType
-from blackboard import RetryPolicy, retry_with_backoff, is_transient_error
+from blackboard.events import EventBus, Event, EventType
+from blackboard.retry import RetryPolicy, retry_with_backoff, is_transient_error
 
 
 class TestEventBus:

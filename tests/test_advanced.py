@@ -5,11 +5,13 @@ from typing import Optional
 
 from blackboard import (
     Orchestrator, Worker, WorkerOutput, WorkerInput,
-    Artifact, Feedback, Blackboard, Status,
-    Middleware, MiddlewareStack, StepContext, WorkerContext,
-    BudgetMiddleware,
-    LLMResponse, LLMUsage, UsageTracker
+    Artifact, Feedback, Blackboard, Status
 )
+from blackboard.middleware import (
+    Middleware, MiddlewareStack, StepContext, WorkerContext,
+    BudgetMiddleware
+)
+from blackboard.usage import LLMResponse, LLMUsage, UsageTracker
 
 
 class MockLLM:
@@ -241,7 +243,7 @@ class TestJSONParsing:
         decision = orch._parse_llm_response(response)
         
         assert decision.action == "call"
-        assert decision.worker_name == "Simple"
+        assert decision.calls[0].worker_name == "Simple"
     
     def test_parse_json_repair_trailing_comma(self):
         """Test JSON repair for trailing commas."""

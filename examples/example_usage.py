@@ -82,7 +82,7 @@ class HaikuWriter(Worker):
     
     async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
         self.attempt += 1
-        instructions = inputs.instructions if inputs else state.metadata.get("current_instructions", "")
+        instructions = inputs.instructions if inputs else ""
         
         # Check if there's previous feedback to incorporate
         last_feedback = state.get_latest_feedback()

@@ -94,17 +94,6 @@ class SupervisorDecision:
     action: str  # "call", "call_independent", "done", "fail"
     calls: List[WorkerCall] = field(default_factory=list)
     reasoning: str = ""
-    
-    # Backward compatibility
-    @property
-    def worker_name(self) -> Optional[str]:
-        """Get the first worker name (for backward compat)."""
-        return self.calls[0].worker_name if self.calls else None
-    
-    @property
-    def instructions(self) -> str:
-        """Get the first worker's instructions (for backward compat)."""
-        return self.calls[0].instructions if self.calls else ""
 
 
 class Orchestrator:
@@ -553,9 +542,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         else:
             state.update_status(Status.GENERATING)
         
-        # Inject instructions into metadata for backward compat
-        state.metadata["current_instructions"] = call.instructions
-        
+
         await self._publish_event(EventType.WORKER_CALLED, {
             "worker": worker.name,
             "instructions": call.instructions
@@ -976,9 +963,7 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
                     
                     # Parse calls
                     calls = []
-                    if action in ("call_parallel", "call_independent") and "calls" in data:
-                        # Support both for backward compatibility
-                        action = "call_independent"  # Normalize to new name
+                    if action == "call_independent" and "calls" in data:
                         for call_data in data["calls"]:
                             calls.append(WorkerCall(
                                 worker_name=call_data.get("worker", ""),

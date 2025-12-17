@@ -98,84 +98,20 @@ __all__ = [
 ]
 
 # =============================================================================
-# CONVENIENCE RE-EXPORTS (for backward compatibility)
-# Users should migrate to submodule imports for advanced features
+# ADVANCED FEATURES - Import from submodules
 # =============================================================================
-
-# These are available at the top level but NOT in __all__
-# This way they work but don't pollute IDE autocomplete
-
-# Middleware (prefer: from blackboard.middleware import ...)
-from .middleware import (
-    Middleware,
-    MiddlewareStack,
-    StepContext,
-    WorkerContext,
-    BudgetMiddleware,
-    LoggingMiddleware,
-    HumanApprovalMiddleware,
-    AutoSummarizationMiddleware,
-    ApprovalRequired,
-)
-
-# Events (prefer: from blackboard.events import ...)
-from .events import (
-    EventBus,
-    Event,
-    EventType,
-)
-
-# Retry (prefer: from blackboard.retry import ...)
-from .retry import (
-    RetryPolicy,
-    retry_with_backoff,
-    DEFAULT_RETRY_POLICY,
-    NO_RETRY,
-    is_transient_error,
-)
-
-# Usage tracking (prefer: from blackboard.usage import ...)
-from .usage import (
-    UsageTracker,
-    UsageRecord,
-    LLMResponse,
-    LLMUsage,
-    create_openai_tracker,
-)
-
-# Tool calling (prefer: from blackboard.tools import ...)
-from .tools import (
-    ToolDefinition,
-    ToolParameter,
-    ToolCall,
-    ToolCallResponse,
-    ToolCallingLLMClient,
-    worker_to_tool_definition,
-    workers_to_tool_definitions,
-    DONE_TOOL,
-    FAIL_TOOL,
-)
-
-# Memory (prefer: from blackboard.memory import ...)
-from .memory import (
-    Memory,
-    MemoryEntry,
-    SearchResult,
-    SimpleVectorMemory,
-    MemoryWorker,
-    MemoryInput,
-)
-
-# Embeddings (prefer: from blackboard.embeddings import ...)
-from .embeddings import (
-    EmbeddingModel,
-    NoOpEmbedder,
-    TFIDFEmbedder,
-    LocalEmbedder,
-    OpenAIEmbedder,
-    cosine_similarity,
-    get_default_embedder,
-)
-
-# Internal re-exports for advanced usage
-from .core import SupervisorDecision, WorkerCall, LLMResult
+# Users should import advanced features directly from submodules:
+#
+# from blackboard.middleware import BudgetMiddleware, HumanApprovalMiddleware
+# from blackboard.events import EventBus, Event, EventType
+# from blackboard.retry import RetryPolicy, retry_with_backoff
+# from blackboard.usage import UsageTracker, LLMResponse, LLMUsage
+# from blackboard.tools import ToolDefinition, ToolCallingLLMClient
+# from blackboard.memory import Memory, SimpleVectorMemory
+# from blackboard.embeddings import EmbeddingModel, LocalEmbedder
+# from blackboard.persistence import RedisPersistence, JSONFilePersistence
+# from blackboard.hierarchy import SubOrchestratorWorker
+# from blackboard.streaming import StreamingLLMClient
+# from blackboard.vectordb import ChromaMemory
+# from blackboard.evals import Evaluator, LLMJudge
+# from blackboard.sandbox import DockerSandbox

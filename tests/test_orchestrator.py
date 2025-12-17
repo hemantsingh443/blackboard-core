@@ -32,11 +32,7 @@ class SimpleWriter(Worker):
     description = "Writes text content"
     
     async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
-        instructions = ""
-        if inputs:
-            instructions = inputs.instructions
-        else:
-            instructions = state.metadata.get("current_instructions", "")
+        instructions = inputs.instructions if inputs else ""
         content = f"Generated content: {instructions}" if instructions else "Default content"
         return WorkerOutput(
             artifact=Artifact(type="text", content=content, creator=self.name)

@@ -7,12 +7,16 @@ from typing import Optional
 
 from blackboard import (
     Worker, WorkerOutput, WorkerInput,
-    Artifact, Feedback, Blackboard, Status,
+    Artifact, Feedback, Blackboard, Status
+)
+from blackboard.tools import (
     ToolDefinition, ToolParameter, ToolCall,
-    worker_to_tool_definition, workers_to_tool_definitions,
+    worker_to_tool_definition, workers_to_tool_definitions
+)
+from blackboard.memory import (
     Memory, MemoryEntry, SimpleVectorMemory, MemoryWorker, MemoryInput
 )
-from blackboard.middleware import AutoSummarizationMiddleware
+from blackboard.middleware import AutoSummarizationMiddleware, StepContext
 
 
 class TestToolDefinition:
@@ -261,7 +265,6 @@ class TestAutoSummarization:
         for i in range(5):
             state.add_artifact(Artifact(type="text", content=f"Art {i}", creator="W"))
         
-        from blackboard.middleware import StepContext
         ctx = StepContext(step_number=10, state=state)
         
         # Now async
@@ -290,7 +293,6 @@ class TestAutoSummarization:
         for i in range(10):
             state.add_artifact(Artifact(type="text", content=f"Art {i}", creator="W"))
         
-        from blackboard.middleware import StepContext
         ctx = StepContext(step_number=10, state=state)
         
         # Now async
