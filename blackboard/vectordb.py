@@ -230,6 +230,7 @@ class HybridSearchMemory(Memory):
         self.vector_memory = vector_memory
         self.alpha = alpha
         self._documents: List[MemoryEntry] = []
+        self._tokenized_docs: List[List[str]] = []  # Cache tokenized documents
         self._bm25 = None
     
     def _build_bm25_index(self):
@@ -241,16 +242,18 @@ class HybridSearchMemory(Memory):
                 "Install with: pip install rank-bm25"
             )
         
-        tokenized = [doc.content.lower().split() for doc in self._documents]
-        self._bm25 = BM25Okapi(tokenized)
+        # Use cached tokenization - only build BM25 from cache
+        self._bm25 = BM25Okapi(self._tokenized_docs)
     
     async def store(self, entry: MemoryEntry) -> str:
         # Store in vector memory
         result = await self.vector_memory.store(entry)
         
-        # Add to BM25 index
+        # Add to document list and tokenize incrementally (O(1) per add)
         self._documents.append(entry)
-        self._bm25 = None  # Invalidate index
+        tokens = entry.content.lower().split()
+        self._tokenized_docs.append(tokens)
+        self._bm25 = None  # Invalidate BM25 (rebuild is now fast with cached tokens)
         
         return result
     
@@ -319,13 +322,21 @@ class HybridSearchMemory(Memory):
     
     async def delete(self, entry_id: str) -> bool:
         result = await self.vector_memory.delete(entry_id)
-        self._documents = [d for d in self._documents if d.id != entry_id]
+        
+        # Find index of document to remove
+        for i, doc in enumerate(self._documents):
+            if doc.id == entry_id:
+                self._documents.pop(i)
+                self._tokenized_docs.pop(i)  # Keep cache in sync
+                break
+        
         self._bm25 = None
         return result
     
     async def clear(self) -> None:
         await self.vector_memory.clear()
         self._documents.clear()
+        self._tokenized_docs.clear()  # Clear cache
         self._bm25 = None
     
     async def count(self) -> int:

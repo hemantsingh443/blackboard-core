@@ -3,16 +3,12 @@
 import pytest
 import asyncio
 
-from blackboard import EventBus, Event, EventType, get_event_bus, reset_event_bus
+from blackboard import EventBus, Event, EventType
 from blackboard import RetryPolicy, retry_with_backoff, is_transient_error
 
 
 class TestEventBus:
     """Tests for the event bus."""
-    
-    def setup_method(self):
-        """Reset global event bus before each test."""
-        reset_event_bus()
     
     def test_subscribe_and_publish(self):
         """Test basic subscribe and publish."""
@@ -71,14 +67,21 @@ class TestEventBus:
         
         assert len(received) == 1
     
-    def test_global_event_bus(self):
-        """Test global event bus singleton."""
-        reset_event_bus()
+    def test_event_bus_isolation(self):
+        """Test that separate EventBus instances are isolated."""
+        bus1 = EventBus()
+        bus2 = EventBus()
         
-        bus1 = get_event_bus()
-        bus2 = get_event_bus()
+        received1 = []
+        received2 = []
         
-        assert bus1 is bus2
+        bus1.subscribe(EventType.ARTIFACT_CREATED, lambda e: received1.append(e))
+        bus2.subscribe(EventType.ARTIFACT_CREATED, lambda e: received2.append(e))
+        
+        bus1.publish(Event(EventType.ARTIFACT_CREATED, {"source": "bus1"}))
+        
+        assert len(received1) == 1
+        assert len(received2) == 0  # bus2 should not receive bus1's events
     
     def test_event_to_dict(self):
         """Test event serialization."""

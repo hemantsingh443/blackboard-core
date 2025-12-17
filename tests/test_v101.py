@@ -100,41 +100,41 @@ class TestPersistence:
 class TestSandbox:
     """Tests for sandbox code execution."""
     
-    def test_subprocess_sandbox_success(self):
+    def test_insecure_local_executor_success(self):
         """Test successful code execution."""
-        from blackboard.sandbox import SubprocessSandbox
+        from blackboard.sandbox import InsecureLocalExecutor
         
         async def test():
-            sandbox = SubprocessSandbox(timeout=5)
-            result = await sandbox.execute("print('hello world')")
+            executor = InsecureLocalExecutor(timeout=5)
+            result = await executor.execute("print('hello world')")
             
             assert result.success
             assert "hello world" in result.stdout
         
         asyncio.run(test())
     
-    def test_subprocess_sandbox_error(self):
+    def test_insecure_local_executor_error(self):
         """Test code with error."""
-        from blackboard.sandbox import SubprocessSandbox
+        from blackboard.sandbox import InsecureLocalExecutor
         
         async def test():
-            sandbox = SubprocessSandbox(timeout=5)
-            result = await sandbox.execute("1/0")
+            executor = InsecureLocalExecutor(timeout=5)
+            result = await executor.execute("1/0")
             
             assert not result.success
             assert "ZeroDivisionError" in result.stderr
         
         asyncio.run(test())
     
-    def test_subprocess_sandbox_timeout(self):
+    def test_insecure_local_executor_timeout(self):
         """Test timeout handling."""
-        from blackboard.sandbox import SubprocessSandbox, SandboxTimeoutError
+        from blackboard.sandbox import InsecureLocalExecutor, SandboxTimeoutError
         
         async def test():
-            sandbox = SubprocessSandbox(timeout=1)
+            executor = InsecureLocalExecutor(timeout=1)
             
             with pytest.raises(SandboxTimeoutError):
-                await sandbox.execute("import time; time.sleep(10)")
+                await executor.execute("import time; time.sleep(10)")
         
         asyncio.run(test())
     

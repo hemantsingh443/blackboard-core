@@ -49,8 +49,8 @@ class Sandbox(Protocol):
     - Access to environment variables/secrets
     
     Example:
-        sandbox = SubprocessSandbox(timeout=30)
-        result = await sandbox.execute("print('hello')")
+        executor = InsecureLocalExecutor(timeout=30)
+        result = await executor.execute("print('hello')")
         print(result.stdout)  # "hello"
     """
     
@@ -78,12 +78,11 @@ class Sandbox(Protocol):
         ...
 
 
-class SubprocessSandbox:
+class InsecureLocalExecutor:
     """
-    Subprocess-based sandbox with basic isolation.
+    Local process executor for code execution.
     
-    Provides lightweight isolation by running code in a separate process.
-    Note: This does NOT provide security against malicious code.
+    ⚠️ NOT SECURE - runs code with same privileges as the host process.
     Use DockerSandbox for untrusted code.
     
     Args:
@@ -92,8 +91,8 @@ class SubprocessSandbox:
         allowed_imports: List of allowed module imports (None = all allowed)
         
     Example:
-        sandbox = SubprocessSandbox(timeout=10)
-        result = await sandbox.execute("x = 1 + 1; print(x)")
+        executor = InsecureLocalExecutor(timeout=10)
+        result = await executor.execute("x = 1 + 1; print(x)")
     """
     
     def __init__(

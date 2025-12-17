@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checka
 
 from .state import Blackboard, Status, Artifact, Feedback
 from .protocols import Worker, WorkerOutput, WorkerRegistry, WorkerInput
-from .events import EventBus, Event, EventType, get_event_bus
+from .events import EventBus, Event, EventType
 from .retry import RetryPolicy, retry_with_backoff, DEFAULT_RETRY_POLICY, is_transient_error
 from .usage import LLMResponse, LLMUsage, UsageTracker
 from .middleware import Middleware, MiddlewareStack, StepContext, WorkerContext
@@ -217,7 +217,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             workers: List of workers to manage
             verbose: If True, enable INFO level logging
             on_step: Optional callback called after each step
-            event_bus: Event bus for observability (uses global if not provided)
+            event_bus: Event bus for observability (creates new if not provided)
             retry_policy: Retry policy for worker execution (default: 3 retries)
             auto_save_path: If provided, auto-save state after each step
             enable_parallel: If True, allow parallel worker execution
@@ -240,7 +240,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             self.registry.register(worker)
         self.verbose = verbose
         self.on_step = on_step
-        self.event_bus = event_bus or get_event_bus()
+        self.event_bus = event_bus or EventBus()
         self.retry_policy = retry_policy or DEFAULT_RETRY_POLICY
         self.auto_save_path = auto_save_path
         self.enable_parallel = enable_parallel
@@ -473,21 +473,8 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         # Apply results to state (sequentially to maintain consistency)
         for call, result in zip(safe_calls, results):
             if isinstance(result, Exception):
-                # Check if this might be a dependency failure (stale read issue)
-                if self._is_potential_dependency_error(result):
-                    logger.warning(
-                        f"Possible stale read issue for '{call.worker_name}', "
-                        f"retrying sequentially: {result}"
-                    )
-                    # Retry this worker sequentially with updated state
-                    try:
-                        await self._execute_worker(state, call)
-                        continue  # Success - don't add error feedback
-                    except Exception as retry_error:
-                        logger.error(f"Sequential retry also failed: {retry_error}")
-                        result = retry_error  # Fall through to error handling
-                
-                logger.error(f"Parallel worker error: {result}")
+                # Let failures fail - no heuristic retry
+                logger.error(f"Parallel worker '{call.worker_name}' failed: {result}")
                 state.add_feedback(Feedback(
                     source="Orchestrator",
                     critique=f"Worker '{call.worker_name}' failed: {str(result)}",
@@ -1052,42 +1039,6 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         event = Event(type=event_type, data=data)
         await self.event_bus.publish_async(event)
 
-    def _is_potential_dependency_error(self, error: Exception) -> bool:
-        """
-        Check if an error likely indicates a stale read / dependency issue.
-        
-        These errors often occur when a parallel worker tries to access
-        state that another worker was supposed to create but hasn't yet
-        (because they ran in parallel with stale state).
-        
-        Returns:
-            True if the error pattern suggests a dependency issue
-        """
-        # Common dependency-related exceptions
-        dependency_exceptions = (
-            FileNotFoundError,
-            KeyError,
-            AttributeError,
-            IndexError,
-        )
-        
-        if isinstance(error, dependency_exceptions):
-            return True
-        
-        # Check error message patterns
-        error_str = str(error).lower()
-        dependency_patterns = [
-            "not found",
-            "does not exist",
-            "missing",
-            "no such file",
-            "undefined",
-            "null",
-            "none",
-        ]
-        
-        return any(pattern in error_str for pattern in dependency_patterns)
-
     def _validate_tool_definitions(self) -> None:
         """
         Validate all tool definitions have valid schemas.
@@ -1095,10 +1046,21 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         Raises:
             ValueError: If any tool definition is invalid
         """
+        # LLM providers require alphanumeric, underscore, hyphen only
+        import re
+        VALID_TOOL_NAME = re.compile(r'^[a-zA-Z0-9_-]+$')
+        
         for tool in self._tool_definitions:
-            # Validate name
+            # Validate name is not empty
             if not tool.name or not tool.name.strip():
                 raise ValueError(f"Tool has empty name: {tool}")
+            
+            # Validate name format (LLM requirement)
+            if not VALID_TOOL_NAME.match(tool.name):
+                raise ValueError(
+                    f"Tool name '{tool.name}' contains invalid characters. "
+                    "Use only alphanumeric, underscore, and hyphen."
+                )
             
             # Validate each parameter
             for param in tool.parameters:

@@ -183,23 +183,3 @@ class EventBus:
         self._async_subscribers.clear()
         self._all_subscribers.clear()
         self._async_all_subscribers.clear()
-
-
-# Global event bus instance (optional convenience)
-_global_bus: EventBus = None
-
-
-def get_event_bus() -> EventBus:
-    """Get or create the global event bus."""
-    global _global_bus
-    if _global_bus is None:
-        _global_bus = EventBus()
-    return _global_bus
-
-
-def reset_event_bus() -> None:
-    """Reset the global event bus (for testing)."""
-    global _global_bus
-    if _global_bus:
-        _global_bus.clear()
-    _global_bus = None

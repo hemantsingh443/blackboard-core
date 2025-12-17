@@ -106,6 +106,7 @@ class Blackboard(BaseModel):
         Save the blackboard state to a JSON file.
         
         Uses optimistic locking to prevent data loss from concurrent updates.
+        Uses atomic write (temp file + rename) to prevent corruption on crash.
         
         Args:
             path: Path to save the JSON file
@@ -117,6 +118,9 @@ class Blackboard(BaseModel):
         Example:
             state.save_to_json("session_001.json")
         """
+        import tempfile
+        import os
+        
         path = Path(path)
         
         # Optimistic locking: check if disk version is newer
@@ -133,11 +137,29 @@ class Blackboard(BaseModel):
             except Exception:
                 pass  # If we can't load, proceed with save
         
-        # Increment version and save
+        # Increment version
         self.version += 1
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(self.model_dump_json(indent=2))
+        
+        # Atomic write: write to temp file then rename
+        # This prevents corruption if the process crashes mid-write
+        temp_fd, temp_path = tempfile.mkstemp(
+            suffix='.tmp',
+            prefix='.blackboard_',
+            dir=path.parent
+        )
+        try:
+            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+                f.write(self.model_dump_json(indent=2))
+            # Atomic rename (on POSIX) or replace (on Windows)
+            os.replace(temp_path, path)
+        except:
+            # Clean up temp file on failure
+            try:
+                os.unlink(temp_path)
+            except:
+                pass
+            raise
     
     @classmethod
     def load_from_json(cls, path: Union[str, Path]) -> "Blackboard":
