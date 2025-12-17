@@ -28,6 +28,7 @@ classifiers = [
 dependencies = [
     "pydantic>=2.0.0",
     "typing-extensions>=4.0.0",
+    "litellm>=1.40.0",  # Default LLM client - 100+ model support
 ]
 
 [project.optional-dependencies]
@@ -45,10 +46,26 @@ chroma = [
 hybrid = [
     "rank-bm25>=0.2.2",
 ]
+tui = [
+    "rich>=13.0.0",
+]
+mcp = [
+    "mcp[cli]>=1.0.0",
+]
+telemetry = [
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp>=1.20.0",
+]
 all = [
     "redis>=5.0.0",
     "chromadb>=0.4.0",
     "rank-bm25>=0.2.2",
+    "rich>=13.0.0",
+    "mcp[cli]>=1.0.0",
+    "opentelemetry-api>=1.20.0",
+    "opentelemetry-sdk>=1.20.0",
+    "opentelemetry-exporter-otlp>=1.20.0",
 ]
 
 [project.urls]

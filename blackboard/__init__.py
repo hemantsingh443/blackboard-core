@@ -3,37 +3,32 @@ Blackboard-Core SDK v1.1.0
 
 A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems.
 
-## Quick Start
+## Quick Start (30 seconds)
 
 ```python
-from blackboard import Orchestrator, Worker, WorkerOutput, Artifact, Blackboard
+from blackboard import Orchestrator, worker
+from blackboard.llm import LiteLLMClient
 
-class Writer(Worker):
-    name = "Writer"
-    description = "Generates content"
-    
-    async def run(self, state, inputs=None):
-        return WorkerOutput(
-            artifact=Artifact(type="text", content="Hello!", creator=self.name)
-        )
+@worker(name="Greeter", description="Says hello")
+def greet(name: str = "World") -> str:
+    return f"Hello, {name}!"
 
-orchestrator = Orchestrator(llm=my_llm, workers=[Writer()])
-result = await orchestrator.run(goal="Write a greeting")
+llm = LiteLLMClient(model="gpt-4o")  # Auto-detects OPENAI_API_KEY
+orchestrator = Orchestrator(llm=llm, workers=[greet])
+result = orchestrator.run_sync(goal="Greet the user")
 ```
 
 ## Namespace Organization
 
 Core API (always stable):
 - `from blackboard import Orchestrator, Worker, Blackboard, Artifact, Feedback`
+- `from blackboard import worker, critic`  # Decorators
 
 Advanced features (opt-in submodules):
+- `from blackboard.llm import LiteLLMClient`
 - `from blackboard.middleware import BudgetMiddleware, HumanApprovalMiddleware`
+- `from blackboard.tui import BlackboardTUI, watch`
 - `from blackboard.persistence import RedisPersistence, JSONFilePersistence`
-- `from blackboard.hierarchy import SubOrchestratorWorker`
-- `from blackboard.streaming import StreamingLLMClient`
-- `from blackboard.vectordb import ChromaMemory`
-- `from blackboard.evals import Evaluator, LLMJudge`
-- `from blackboard.sandbox import InsecureLocalExecutor, DockerSandbox`
 """
 
 # =============================================================================
@@ -65,6 +60,12 @@ from .core import (
     run_blackboard_sync,
 )
 
+# Functional worker decorators
+from .decorators import (
+    worker,
+    critic,
+)
+
 # =============================================================================
 # VERSION
 # =============================================================================
@@ -88,6 +89,9 @@ __all__ = [
     "WorkerOutput",
     "WorkerInput",
     "WorkerRegistry",
+    # Decorators (new!)
+    "worker",
+    "critic",
     # Orchestrator (stable)
     "Orchestrator",
     "LLMClient",
@@ -100,18 +104,12 @@ __all__ = [
 # =============================================================================
 # ADVANCED FEATURES - Import from submodules
 # =============================================================================
-# Users should import advanced features directly from submodules:
-#
+# from blackboard.llm import LiteLLMClient, create_llm
+# from blackboard.decorators import worker, critic
+# from blackboard.tui import BlackboardTUI, watch
 # from blackboard.middleware import BudgetMiddleware, HumanApprovalMiddleware
 # from blackboard.events import EventBus, Event, EventType
-# from blackboard.retry import RetryPolicy, retry_with_backoff
 # from blackboard.usage import UsageTracker, LLMResponse, LLMUsage
-# from blackboard.tools import ToolDefinition, ToolCallingLLMClient
 # from blackboard.memory import Memory, SimpleVectorMemory
-# from blackboard.embeddings import EmbeddingModel, LocalEmbedder
 # from blackboard.persistence import RedisPersistence, JSONFilePersistence
-# from blackboard.hierarchy import SubOrchestratorWorker
-# from blackboard.streaming import StreamingLLMClient
-# from blackboard.vectordb import ChromaMemory
-# from blackboard.evals import Evaluator, LLMJudge
-# from blackboard.sandbox import DockerSandbox
+
