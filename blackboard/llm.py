@@ -21,17 +21,19 @@ Example:
 """
 
 import asyncio
+import json
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from typing import Any, AsyncIterator, Awaitable, Dict, List, Optional, Union
 
 from .core import LLMClient
 from .usage import LLMResponse, LLMUsage
 from .streaming import StreamingLLMClient
+from .tools import ToolCallingLLMClient, ToolDefinition, ToolCall
 
 logger = logging.getLogger("blackboard.llm")
 
 
-class LiteLLMClient(LLMClient, StreamingLLMClient):
+class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
     """
     Unified LLM client using LiteLLM.
     
@@ -197,6 +199,120 @@ class LiteLLMClient(LLMClient, StreamingLLMClient):
                     
         except Exception as e:
             logger.error(f"LiteLLM streaming error: {e}")
+            raise
+    
+    def generate_with_tools(
+        self,
+        prompt: str,
+        tools: List[ToolDefinition]
+    ) -> Union[str, List[ToolCall]]:
+        """
+        Generate a response with tool calling support.
+        
+        Uses LiteLLM's native function calling to let the model
+        call tools directly, avoiding JSON parsing.
+        
+        Args:
+            prompt: The prompt to send
+            tools: Available tools
+            
+        Returns:
+            Either a string response or a list of tool calls
+        """
+        import litellm
+        
+        # Convert tools to OpenAI format (LiteLLM uses this for all providers)
+        tool_defs = [tool.to_openai_format() for tool in tools]
+        
+        try:
+            response = litellm.completion(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                tools=tool_defs,
+                tool_choice="auto",
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                timeout=self.timeout,
+                **self.kwargs
+            )
+            
+            message = response.choices[0].message
+            
+            # Check if LLM made tool calls
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                tool_calls = []
+                for tc in message.tool_calls:
+                    try:
+                        arguments = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        arguments = {"raw": tc.function.arguments}
+                    
+                    tool_calls.append(ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=arguments
+                    ))
+                return tool_calls
+            
+            # No tool calls - return text response
+            return message.content or ""
+            
+        except Exception as e:
+            logger.error(f"LiteLLM tool calling error: {e}")
+            raise
+    
+    async def agenerate_with_tools(
+        self,
+        prompt: str,
+        tools: List[ToolDefinition]
+    ) -> Union[str, List[ToolCall]]:
+        """
+        Generate a response with tool calling support (async).
+        
+        Args:
+            prompt: The prompt to send
+            tools: Available tools
+            
+        Returns:
+            Either a string response or a list of tool calls
+        """
+        import litellm
+        
+        tool_defs = [tool.to_openai_format() for tool in tools]
+        
+        try:
+            response = await litellm.acompletion(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                tools=tool_defs,
+                tool_choice="auto",
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                timeout=self.timeout,
+                **self.kwargs
+            )
+            
+            message = response.choices[0].message
+            
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                tool_calls = []
+                for tc in message.tool_calls:
+                    try:
+                        arguments = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        arguments = {"raw": tc.function.arguments}
+                    
+                    tool_calls.append(ToolCall(
+                        id=tc.id,
+                        name=tc.function.name,
+                        arguments=arguments
+                    ))
+                return tool_calls
+            
+            return message.content or ""
+            
+        except Exception as e:
+            logger.error(f"LiteLLM async tool calling error: {e}")
             raise
     
     def __repr__(self) -> str:

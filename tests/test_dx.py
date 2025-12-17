@@ -170,6 +170,19 @@ class TestLiteLLMClient:
         
         client = LiteLLMClient(model="claude-3-5-sonnet-20241022")
         assert "claude-3-5-sonnet-20241022" in repr(client)
+    
+    def test_tool_calling_protocol(self):
+        """Test that LiteLLMClient implements ToolCallingLLMClient."""
+        from blackboard.llm import LiteLLMClient
+        from blackboard.tools import ToolCallingLLMClient
+        
+        client = LiteLLMClient(model="gpt-4o")
+        
+        # Verify it passes isinstance check
+        assert isinstance(client, ToolCallingLLMClient)
+        
+        # Verify method exists
+        assert hasattr(client, 'generate_with_tools')
 
 
 class TestTUI:

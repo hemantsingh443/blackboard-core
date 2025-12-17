@@ -99,22 +99,41 @@ class BlackboardTUI:
         self.event_bus.subscribe(EventType.ORCHESTRATOR_COMPLETED, self._on_completed)
     
     def _on_step_started(self, event) -> None:
+        """Handle step started event."""
         self._step_count = event.data.get("step", 0)
+        # Extract state from event if available
+        if "state" in event.data:
+            self._current_state = event.data["state"]
         self._refresh()
     
     def _on_step_completed(self, event) -> None:
+        """Handle step completed event."""
+        if "state" in event.data:
+            self._current_state = event.data["state"]
         self._refresh()
     
     def _on_worker_called(self, event) -> None:
+        """Handle worker called event."""
+        if "state" in event.data:
+            self._current_state = event.data["state"]
         self._refresh()
     
     def _on_worker_completed(self, event) -> None:
+        """Handle worker completed event."""
+        if "state" in event.data:
+            self._current_state = event.data["state"]
         self._refresh()
     
     def _on_artifact_created(self, event) -> None:
+        """Handle artifact created event."""
+        if "state" in event.data:
+            self._current_state = event.data["state"]
         self._refresh()
     
     def _on_completed(self, event) -> None:
+        """Handle orchestrator completed event."""
+        if "state" in event.data:
+            self._current_state = event.data["state"]
         self._refresh()
     
     def _refresh(self) -> None:
