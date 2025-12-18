@@ -273,60 +273,108 @@ class Blackboard(BaseModel):
 
     def to_context_string(
         self,
+        max_tokens: int = 12000,
+        chars_per_token: int = 4,
         max_artifacts: int = 3,
-        max_feedback: int = 5,
-        max_content_length: int = 500
+        max_feedback: int = 5
     ) -> str:
         """
-        Generate a human-readable context string for the supervisor LLM.
+        Generate a token-aware context string for the supervisor LLM.
         
         This is what the Supervisor "sees" when deciding what to do next.
-        Implements sliding window to prevent context overflow.
+        Uses smart truncation to stay within token budget while prioritizing
+        critical information (goal, status, feedback) over artifact content.
         
         Args:
+            max_tokens: Maximum tokens for the entire context (default: 12000)
+            chars_per_token: Approximate characters per token (default: 4)
             max_artifacts: Maximum number of recent artifacts to include
             max_feedback: Maximum number of recent feedback entries to include
-            max_content_length: Maximum length of artifact content preview
+            
+        Returns:
+            Context string within the token budget
         """
-        lines = [
-            f"## Goal\n{self.goal}",
-            f"\n## Status\n{self.status.value.upper()}",
-        ]
+        max_chars = max_tokens * chars_per_token
+        
+        # =================================================================
+        # Priority 1: Goal and Status (always included)
+        # =================================================================
+        base_context = f"## Goal\n{self.goal}\n\n## Status\n{self.status.value.upper()}\n"
         
         # Include context summary if available (for long sessions)
         if self.context_summary:
-            lines.append(f"\n## Previous Context Summary\n{self.context_summary}")
+            base_context += f"\n## Previous Context Summary\n{self.context_summary}\n"
         
-        # Add recent artifacts (sliding window)
-        recent_artifacts = self.artifacts[-max_artifacts:] if self.artifacts else []
-        if recent_artifacts:
-            if len(self.artifacts) > max_artifacts:
-                lines.append(f"\n## Artifacts ({len(self.artifacts)} total, showing last {max_artifacts})")
-            else:
-                lines.append(f"\n## Artifacts ({len(self.artifacts)} total)")
-            
-            for artifact in recent_artifacts:
-                content_preview = str(artifact.content)[:max_content_length]
-                if len(str(artifact.content)) > max_content_length:
-                    content_preview += "..."
-                lines.append(f"\n### {artifact.type} (v{artifact.version}) by {artifact.creator}")
-                lines.append(f"{content_preview}")
+        base_context += f"\n## Step Count\n{self.step_count}\n"
         
-        # Add recent feedback (sliding window)
-        recent_feedback = self.feedback[-max_feedback:] if self.feedback else []
+        remaining_chars = max_chars - len(base_context)
+        
+        # =================================================================
+        # Priority 2: Feedback (critical - supervisor needs to see errors)
+        # =================================================================
+        feedback_str = ""
+        recent_feedback = list(reversed(self.feedback[-max_feedback:])) if self.feedback else []
         if recent_feedback:
             if len(self.feedback) > max_feedback:
-                lines.append(f"\n## Feedback ({len(self.feedback)} total, showing last {max_feedback})")
+                feedback_str = f"\n## Recent Feedback ({len(self.feedback)} total, showing last {max_feedback})\n"
             else:
-                lines.append(f"\n## Feedback ({len(self.feedback)} total)")
+                feedback_str = f"\n## Feedback ({len(self.feedback)} total)\n"
             
             for fb in recent_feedback:
                 status = "PASSED" if fb.passed else "FAILED"
-                lines.append(f"\n- [{status}] {fb.source}: {fb.critique}")
+                feedback_str += f"- [{status}] {fb.source}: {fb.critique}\n"
         
-        lines.append(f"\n## Step Count\n{self.step_count}")
+        remaining_chars -= len(feedback_str)
         
-        return "\n".join(lines)
+        # =================================================================
+        # Priority 3: Artifacts (variable - use smart truncation)
+        # =================================================================
+        artifacts_str = ""
+        recent_artifacts = self.artifacts[-max_artifacts:] if self.artifacts else []
+        
+        if recent_artifacts:
+            if len(self.artifacts) > max_artifacts:
+                artifacts_str = f"\n## Artifacts ({len(self.artifacts)} total, showing last {max_artifacts})\n"
+            else:
+                artifacts_str = f"\n## Artifacts ({len(self.artifacts)} total)\n"
+            
+            remaining_chars -= len(artifacts_str)
+            
+            for artifact in recent_artifacts:
+                header = f"\n### {artifact.type} (v{artifact.version}, ID: {artifact.id[:8]}) by {artifact.creator}\n"
+                content_str = str(artifact.content)
+                content_len = len(content_str)
+                
+                # Calculate how much space we have for this artifact's content
+                # Reserve some space for subsequent artifacts
+                artifact_budget = remaining_chars // max(1, len(recent_artifacts))
+                content_budget = artifact_budget - len(header) - 50  # 50 char buffer
+                
+                if content_budget <= 0:
+                    # No space - show metadata only
+                    body = f"[Content too large to display: {content_len} chars]\n"
+                elif content_len <= content_budget:
+                    # Fits entirely
+                    body = content_str + "\n"
+                elif content_len > 2000 and content_budget >= 1000:
+                    # Large content - show head/tail preview
+                    head_size = min(400, content_budget // 3)
+                    tail_size = min(400, content_budget // 3)
+                    omitted = content_len - head_size - tail_size
+                    body = (
+                        content_str[:head_size] + 
+                        f"\n... [{omitted} chars omitted] ...\n" + 
+                        content_str[-tail_size:] + "\n"
+                    )
+                else:
+                    # Truncate with ellipsis
+                    body = content_str[:content_budget] + "...\n"
+                
+                artifact_entry = header + body
+                artifacts_str += artifact_entry
+                remaining_chars -= len(artifact_entry)
+        
+        return base_context + feedback_str + artifacts_str
 
     def get_context_summary(self) -> str:
         """

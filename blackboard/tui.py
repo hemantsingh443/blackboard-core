@@ -60,20 +60,6 @@ class BlackboardTUI:
         show_reasoning: bool = True,
         max_content_length: int = 200
     ):
-        try:
-            from rich.console import Console
-            from rich.live import Live
-            from rich.panel import Panel
-            from rich.table import Table
-            from rich.text import Text
-            from rich.layout import Layout
-            self._rich_available = True
-        except ImportError:
-            self._rich_available = False
-            logger.warning("rich not installed. Install with: pip install 'blackboard-core[tui]'")
-            return
-        
-        self.console = Console()
         self.event_bus = event_bus
         self.show_artifacts = show_artifacts
         self.show_reasoning = show_reasoning
@@ -83,6 +69,26 @@ class BlackboardTUI:
         self._current_decision: Optional["SupervisorDecision"] = None
         self._live: Optional[Live] = None
         self._step_count = 0
+        
+        # Enhanced tracking for dynamic updates
+        self._current_worker: Optional[str] = None
+        self._activity_log: list = []
+        self._is_thinking: bool = False
+        
+        try:
+            from rich.console import Console
+            from rich.live import Live
+            from rich.panel import Panel
+            from rich.table import Table
+            from rich.text import Text
+            from rich.layout import Layout
+            from rich.spinner import Spinner
+            self._rich_available = True
+            self.console = Console()
+        except ImportError:
+            self._rich_available = False
+            logger.warning("rich not installed. Install with: pip install 'blackboard-core[tui]'")
+            return
         
         if event_bus:
             self._subscribe_events()
@@ -101,40 +107,62 @@ class BlackboardTUI:
     def _on_step_started(self, event) -> None:
         """Handle step started event."""
         self._step_count = event.data.get("step", 0)
-        # Extract state from event if available
+        self._is_thinking = True
+        self._add_activity(f"🧠 Step {self._step_count}: Supervisor thinking...")
         if "state" in event.data:
             self._current_state = event.data["state"]
         self._refresh()
     
     def _on_step_completed(self, event) -> None:
         """Handle step completed event."""
+        self._is_thinking = False
         if "state" in event.data:
             self._current_state = event.data["state"]
         self._refresh()
     
     def _on_worker_called(self, event) -> None:
         """Handle worker called event."""
+        worker_name = event.data.get("worker", "Unknown")
+        self._current_worker = worker_name
+        self._add_activity(f"⚡ Calling {worker_name}...")
         if "state" in event.data:
             self._current_state = event.data["state"]
         self._refresh()
     
     def _on_worker_completed(self, event) -> None:
         """Handle worker completed event."""
+        worker_name = event.data.get("worker", self._current_worker or "Worker")
+        self._add_activity(f"✓ {worker_name} completed")
+        self._current_worker = None
         if "state" in event.data:
             self._current_state = event.data["state"]
         self._refresh()
     
     def _on_artifact_created(self, event) -> None:
         """Handle artifact created event."""
+        artifact_type = event.data.get("artifact_type", "artifact")
+        creator = event.data.get("creator", "Worker")
+        self._add_activity(f"📄 New {artifact_type} from {creator}")
         if "state" in event.data:
             self._current_state = event.data["state"]
         self._refresh()
     
     def _on_completed(self, event) -> None:
         """Handle orchestrator completed event."""
+        status = event.data.get("status", "done")
+        self._add_activity(f"🏁 Completed: {status}")
+        self._current_worker = None
+        self._is_thinking = False
         if "state" in event.data:
             self._current_state = event.data["state"]
         self._refresh()
+    
+    def _add_activity(self, message: str) -> None:
+        """Add an activity to the log (keep last 5)."""
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self._activity_log.append(f"[dim]{timestamp}[/dim] {message}")
+        self._activity_log = self._activity_log[-5:]  # Keep last 5
     
     def _refresh(self) -> None:
         """Refresh the display."""
@@ -155,47 +183,131 @@ class BlackboardTUI:
         from rich.table import Table
         from rich.text import Text
         from rich.console import Group
+        from rich.spinner import Spinner
+        from rich.markdown import Markdown
+        from rich import box
+        
+        components = []
         
         # Header with goal and status
         header = Text()
-        header.append(f"Goal: ", style="bold")
-        header.append(state.goal[:80] + "..." if len(state.goal) > 80 else state.goal)
-        header.append(f"\nStatus: ", style="bold")
-        header.append(state.status.value, style=self._status_style(state.status.value))
-        header.append(f" | Step: {state.step_count}")
+        header.append("Goal: ", style="bold cyan")
+        goal_text = state.goal[:80] + "..." if len(state.goal) > 80 else state.goal
+        header.append(goal_text)
+        header.append("\n")
+        header.append("Status: ", style="bold")
+        header.append(state.status.value.upper(), style=f"bold {self._status_style(state.status.value)}")
+        header.append(f" │ Step: {state.step_count}", style="dim")
+        components.append(header)
+        components.append(Text())  # Spacer
         
-        # Artifacts table
-        artifacts_table = Table(title="📄 Artifacts", show_header=True, header_style="bold magenta")
-        artifacts_table.add_column("Type", style="cyan", width=12)
-        artifacts_table.add_column("Creator", style="green", width=15)
-        artifacts_table.add_column("Content", style="white")
+        # Activity log (shows real-time updates)
+        if self._activity_log:
+            activity = Text()
+            activity.append("─── Activity ───\n", style="bold yellow")
+            for log_entry in self._activity_log:
+                activity.append_text(Text.from_markup(log_entry + "\n"))
+            components.append(activity)
         
-        if self.show_artifacts:
-            for artifact in state.artifacts[-3:]:  # Last 3
+        # Current worker indicator with ANIMATED spinner
+        if self._current_worker:
+            spinner = Spinner("dots", text=Text.assemble(
+                ("Running: ", "bold"),
+                (self._current_worker, "bold green")
+            ), style="cyan")
+            components.append(spinner)
+            components.append(Text())
+        elif self._is_thinking:
+            spinner = Spinner("dots", text=Text.assemble(
+                ("Supervisor deciding next action...", "italic yellow")
+            ), style="yellow")
+            components.append(spinner)
+            components.append(Text())
+        
+        # Artifacts - show as markdown panels for proper rendering
+        if self.show_artifacts and state.artifacts:
+            components.append(Text("📄 Artifacts", style="bold magenta"))
+            components.append(Text())
+            
+            for artifact in state.artifacts[-2:]:  # Last 2 for space
                 content = str(artifact.content)
-                if len(content) > self.max_content_length:
-                    content = content[:self.max_content_length] + "..."
-                artifacts_table.add_row(artifact.type, artifact.creator, content)
+                # Truncate very long content
+                if len(content) > 400:
+                    content = content[:400] + "\n\n*...content truncated...*"
+                
+                # Wrap long lines to prevent overflow
+                lines = []
+                for line in content.split('\n'):
+                    # Wrap lines longer than 80 chars
+                    while len(line) > 80:
+                        lines.append(line[:80])
+                        line = line[80:]
+                    lines.append(line)
+                content = '\n'.join(lines)
+                
+                # Render as markdown for proper formatting
+                try:
+                    md_content = Markdown(content)
+                except:
+                    md_content = Text(content[:300] + "...")
+                
+                artifact_panel = Panel(
+                    md_content,
+                    title=f"[cyan]{artifact.type}[/cyan] by [green]{artifact.creator}[/green]",
+                    border_style="dim",
+                    padding=(0, 1),
+                    expand=False  # Don't expand, let content determine width
+                )
+                components.append(artifact_panel)
         
-        # Feedback table
-        feedback_table = Table(title="💬 Feedback", show_header=True, header_style="bold yellow")
-        feedback_table.add_column("Source", style="green", width=15)
-        feedback_table.add_column("Passed", style="white", width=8)
-        feedback_table.add_column("Critique", style="white")
-        
-        for fb in state.feedback[-3:]:  # Last 3
-            passed_str = "✅" if fb.passed else "❌"
-            critique = fb.critique[:50] + "..." if len(fb.critique) > 50 else fb.critique
-            feedback_table.add_row(fb.source, passed_str, critique)
+        # Feedback section
+        if state.feedback:
+            components.append(Text())
+            components.append(Text("💬 Feedback", style="bold yellow"))
+            
+            for fb in state.feedback[-2:]:  # Last 2
+                passed_icon = "✅" if fb.passed else "❌"
+                passed_style = "green" if fb.passed else "red"
+                
+                fb_text = Text()
+                fb_text.append(f"{passed_icon} ", style=passed_style)
+                fb_text.append(f"{fb.source}: ", style="bold")
+                
+                # Show critique, truncated
+                critique = fb.critique[:200] + "..." if len(fb.critique) > 200 else fb.critique
+                critique = critique.replace("\n", " ")
+                fb_text.append(critique, style="dim")
+                
+                components.append(fb_text)
         
         # Combine into panel
-        content = Group(header, "", artifacts_table, "", feedback_table)
+        content = Group(*components)
+        
+        # Dynamic border color based on state
+        if self._current_worker:
+            border_style = "green"
+            title_icon = "⚡"
+        elif self._is_thinking:
+            border_style = "yellow"
+            title_icon = "🧠"
+        elif state.status.value == "done":
+            border_style = "green"
+            title_icon = "✅"
+        elif state.status.value == "failed":
+            border_style = "red"
+            title_icon = "❌"
+        else:
+            border_style = "blue"
+            title_icon = "🔲"
         
         return Panel(
             content,
-            title=f"[bold blue]🔲 Blackboard[/bold blue]",
-            border_style="blue"
+            title=f"[bold {border_style}]{title_icon} Blackboard[/bold {border_style}]",
+            border_style=border_style,
+            padding=(1, 2),
+            expand=True  # Dynamic width based on terminal size
         )
+
     
     def _status_style(self, status: str) -> str:
         """Get style for status."""
@@ -230,7 +342,7 @@ class BlackboardTUI:
         self._live = Live(
             self.render_state(self._create_empty_state()),
             console=self.console,
-            refresh_per_second=4
+            refresh_per_second=10  # Smooth updates
         )
         return self._live
     
@@ -302,8 +414,8 @@ def watch(orchestrator, goal: str, **kwargs) -> "Blackboard":
         
         result = watch(orchestrator, goal="Write a poem")
     """
-    import asyncio
     from .state import Blackboard
+    from .core import _run_sync
     
     # Create state BEFORE running - TUI holds reference to this mutable object
     state = Blackboard(goal=goal)
@@ -321,5 +433,5 @@ def watch(orchestrator, goal: str, **kwargs) -> "Blackboard":
         tui.print_summary(result)
         return result
     
-    return asyncio.run(run_with_tui())
+    return _run_sync(run_with_tui())
 

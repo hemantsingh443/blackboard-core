@@ -6,7 +6,7 @@ Provides token counting and cost tracking for LLM API usage.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -74,10 +74,19 @@ class UsageTracker:
     """
     Tracks and aggregates LLM usage across a session.
     
+    Args:
+        cost_per_1k_input: Default cost per 1000 input tokens
+        cost_per_1k_output: Default cost per 1000 output tokens
+        model_costs: Dict of model-specific costs
+        max_records: Maximum records to keep (oldest evicted when exceeded)
+        on_flush: Optional callback when records are evicted: fn(evicted_records)
+    
     Example:
         tracker = UsageTracker(
             cost_per_1k_input=0.01,
-            cost_per_1k_output=0.03
+            cost_per_1k_output=0.03,
+            max_records=1000,
+            on_flush=lambda records: save_to_db(records)
         )
         
         # Record usage
@@ -92,7 +101,9 @@ class UsageTracker:
         self,
         cost_per_1k_input: float = 0.0,
         cost_per_1k_output: float = 0.0,
-        model_costs: Optional[Dict[str, Dict[str, float]]] = None
+        model_costs: Optional[Dict[str, Dict[str, float]]] = None,
+        max_records: Optional[int] = 10000,
+        on_flush: Optional[Callable[[List["UsageRecord"]], None]] = None
     ):
         """
         Initialize the usage tracker.
@@ -102,12 +113,20 @@ class UsageTracker:
             cost_per_1k_output: Default cost per 1000 output tokens
             model_costs: Optional dict of model-specific costs:
                 {"gpt-4": {"input": 0.03, "output": 0.06}}
+            max_records: Max records before eviction (None = unlimited)
+            on_flush: Callback when records are evicted
         """
         self.cost_per_1k_input = cost_per_1k_input
         self.cost_per_1k_output = cost_per_1k_output
         self.model_costs = model_costs or {}
+        self.max_records = max_records
+        self.on_flush = on_flush
         
         self._records: List[UsageRecord] = []
+        # Aggregate counters for evicted records
+        self._evicted_tokens: int = 0
+        self._evicted_cost: float = 0.0
+        self._evicted_count: int = 0
     
     def record(self, usage: LLMUsage, context: str = "") -> float:
         """
@@ -130,6 +149,22 @@ class UsageTracker:
         )
         self._records.append(record)
         
+        # Evict oldest records if over limit
+        if self.max_records is not None and len(self._records) > self.max_records:
+            evict_count = len(self._records) - self.max_records
+            evicted = self._records[:evict_count]
+            self._records = self._records[evict_count:]
+            
+            # Aggregate evicted stats
+            for r in evicted:
+                self._evicted_tokens += r.usage.total_tokens
+                self._evicted_cost += r.cost
+                self._evicted_count += 1
+            
+            # Notify callback if provided
+            if self.on_flush:
+                self.on_flush(evicted)
+        
         return cost
     
     def _calculate_cost(self, usage: LLMUsage) -> float:
@@ -147,28 +182,28 @@ class UsageTracker:
     
     @property
     def total_tokens(self) -> int:
-        """Total tokens used across all records."""
-        return sum(r.usage.total_tokens for r in self._records)
+        """Total tokens used across all records (including evicted)."""
+        return sum(r.usage.total_tokens for r in self._records) + self._evicted_tokens
     
     @property
     def total_input_tokens(self) -> int:
-        """Total input tokens used."""
+        """Total input tokens used (current records only)."""
         return sum(r.usage.input_tokens for r in self._records)
     
     @property
     def total_output_tokens(self) -> int:
-        """Total output tokens used."""
+        """Total output tokens used (current records only)."""
         return sum(r.usage.output_tokens for r in self._records)
     
     @property
     def total_cost(self) -> float:
-        """Total cost across all records."""
-        return sum(r.cost for r in self._records)
+        """Total cost across all records (including evicted)."""
+        return sum(r.cost for r in self._records) + self._evicted_cost
     
     @property
     def call_count(self) -> int:
-        """Number of LLM calls recorded."""
-        return len(self._records)
+        """Total number of LLM calls (including evicted)."""
+        return len(self._records) + self._evicted_count
     
     def get_summary(self) -> Dict[str, Any]:
         """Get a summary of usage statistics."""

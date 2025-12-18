@@ -29,6 +29,37 @@ from .tools import (
 logger = logging.getLogger("blackboard")
 
 
+# =============================================================================
+# Event Loop Safety Helper
+# =============================================================================
+
+def _run_sync(coro):
+    """
+    Safely run a coroutine in a sync context.
+    
+    Handles the case where an event loop is already running (e.g., FastAPI,
+    Jupyter, asyncio REPL). Falls back to running in a thread pool.
+    
+    Args:
+        coro: Coroutine to execute
+        
+    Returns:
+        The result of the coroutine
+    """
+    try:
+        asyncio.get_running_loop()
+        # Loop is running - can't use asyncio.run()
+        # Execute in a new thread with its own event loop
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
+    except RuntimeError:
+        # No loop running - safe to use asyncio.run()
+        return asyncio.run(coro)
+
+
+
 # Type for LLM responses - can be string or LLMResponse
 LLMResult = Union[str, LLMResponse]
 
@@ -644,8 +675,8 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         state: Optional[Blackboard] = None,
         max_steps: int = 20
     ) -> Blackboard:
-        """Synchronous wrapper for run()."""
-        return asyncio.run(self.run(goal=goal, state=state, max_steps=max_steps))
+        """Synchronous wrapper for run(). Safe to call inside existing event loops."""
+        return _run_sync(self.run(goal=goal, state=state, max_steps=max_steps))
 
     def set_persistence(self, persistence) -> None:
         """
@@ -1116,5 +1147,5 @@ def run_blackboard_sync(
     max_steps: int = 20,
     verbose: bool = False
 ) -> Blackboard:
-    """Convenience function to run the blackboard system (sync)."""
-    return asyncio.run(run_blackboard(goal, llm, workers, max_steps, verbose))
+    """Convenience function to run the blackboard system (sync). Safe inside existing event loops."""
+    return _run_sync(run_blackboard(goal, llm, workers, max_steps, verbose))

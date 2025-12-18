@@ -3,3 +3,5 @@ blackboard_core.egg-info
 env
 __pycache__
 session.json
+.env 
+venv

@@ -6,6 +6,8 @@ A Python SDK for building **LLM-powered multi-agent systems** using the Blackboa
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PyPI version](https://img.shields.io/pypi/v/blackboard-core.svg)](https://pypi.org/project/blackboard-core/)
 
+![Blackboard TUI Demo](public/demo.gif)
+
 ## What is Blackboard-Core?
 
 Blackboard-Core provides a **centralized state architecture** for multi-agent AI systems. Instead of agents messaging each other directly, all agents read from and write to a shared **Blackboard** (state), while a **Supervisor LLM** orchestrates which agent runs next.
@@ -32,12 +34,13 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 - **LLM Orchestration** - A supervisor LLM decides which worker runs next
 - **Async-First** - Built for high-performance async/await patterns
 - **LiteLLM Integration** - 100+ LLM providers via `LiteLLMClient`
-- **Model Context Protocol** - Connect to MCP servers for external tools (v1.2.0)
-- **OpenTelemetry** - Distributed tracing with span hierarchy (v1.2.0)
-- **Session Replay** - Record and replay for debugging (v1.2.0)
+- **Model Context Protocol** - Connect to MCP servers for external tools
+- **OpenTelemetry** - Distributed tracing with span hierarchy
+- **Session Replay** - Record and replay for debugging
 - **Middleware System** - Budget tracking, logging, human approval
 - **Tool Calling** - Native support for OpenAI-style function calling
 - **Memory System** - Vector memory with pluggable embeddings
+- **Live TUI** - Real-time terminal visualization with markdown support
 
 ## Installation
 
@@ -84,51 +87,6 @@ print(result.artifacts[-1].content)
 | **Supervisor** | The LLM that decides which worker to call next |
 | **Artifact** | Versioned output produced by a worker |
 | **Feedback** | Review/critique of an artifact |
-
-## What's New in v1.2.0
-
-### Model Context Protocol (MCP)
-
-```python
-from blackboard.mcp import MCPServerWorker
-
-# Connect to filesystem MCP server
-fs = await MCPServerWorker.create(
-    name="Filesystem",
-    command="npx",
-    args=["-y", "@modelcontextprotocol/server-filesystem", "/path"]
-)
-
-# Each tool exposed as separate worker
-workers = fs.expand_to_workers()  # read_file, write_file, etc.
-orchestrator = Orchestrator(llm=llm, workers=workers)
-```
-
-### OpenTelemetry Tracing
-
-```python
-from blackboard.telemetry import OpenTelemetryMiddleware
-
-otel = OpenTelemetryMiddleware(service_name="my-agent")
-orchestrator = Orchestrator(llm=llm, workers=workers, middleware=[otel])
-# Creates spans: orchestrator.run → step.N → worker.Name
-```
-
-### Session Replay
-
-```python
-from blackboard.replay import SessionRecorder, ReplayOrchestrator
-
-# Record
-recorder = SessionRecorder()
-recorder.attach(orchestrator.event_bus)
-result = await orchestrator.run(goal="...")
-recorder.save("session.json")
-
-# Replay (no API calls!)
-replay = ReplayOrchestrator.from_file("session.json", workers=workers)
-replayed = await replay.run()
-```
 
 ## Advanced Features
 

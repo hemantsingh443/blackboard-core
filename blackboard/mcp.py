@@ -140,11 +140,10 @@ class MCPToolWorker(Worker):
         """
         Execute this specific MCP tool.
         
-        Arguments are extracted from inputs and passed to the MCP server.
+        If the parent server has a persistent connection (via connect()),
+        uses it for maximum performance. Otherwise falls back to one-shot.
         """
         try:
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
             from mcp.types import TextContent
         except ImportError:
             return WorkerOutput(
@@ -173,14 +172,33 @@ class MCPToolWorker(Worker):
                         param_name = list(props.keys())[0]
                         arguments[param_name] = instructions
         
-        # Connect and call tool
-        server_params = StdioServerParameters(
-            command=self._server._command,
-            args=self._server._args,
-            env=self._server._env
-        )
-        
         try:
+            # FAST PATH: Use parent's persistent session if available
+            if self._server.is_connected:
+                content = await self._server.call_tool(self._tool.name, arguments)
+                return WorkerOutput(
+                    artifact=Artifact(
+                        type="mcp_result",
+                        content=content,
+                        creator=self.name,
+                        metadata={
+                            "tool": self._tool.name,
+                            "server": self._server.name,
+                            "persistent": True
+                        }
+                    )
+                )
+            
+            # SLOW PATH: One-shot connection (legacy behavior)
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+            
+            server_params = StdioServerParameters(
+                command=self._server._command,
+                args=self._server._args,
+                env=self._server._env
+            )
+            
             async with stdio_client(server_params) as (read, write):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
@@ -205,7 +223,7 @@ class MCPToolWorker(Worker):
                             metadata={
                                 "tool": self._tool.name,
                                 "server": self._server.name,
-                                "structured": result.structuredContent
+                                "persistent": False
                             }
                         )
                     )
@@ -219,6 +237,7 @@ class MCPToolWorker(Worker):
                     creator=self.name
                 )
             )
+
     
     def __repr__(self) -> str:
         return f"MCPToolWorker({self.name})"
@@ -271,6 +290,12 @@ class MCPServerWorker(Worker):
         self._env = env or {}
         self._tools = tools or []
         self._description = description or self._generate_description()
+        
+        # Persistent session management
+        self._session: Optional["ClientSession"] = None
+        self._stdio_context = None
+        self._session_context = None
+        self._connected = False
     
     @property
     def name(self) -> str:
@@ -288,6 +313,120 @@ class MCPServerWorker(Worker):
     def tools(self) -> List[MCPTool]:
         """Get the list of tools available from this MCP server."""
         return self._tools
+    
+    @property
+    def is_connected(self) -> bool:
+        """Check if server has an active persistent connection."""
+        return self._connected and self._session is not None
+    
+    async def connect(self) -> None:
+        """
+        Establish a persistent connection to the MCP server.
+        
+        This keeps the server process alive for all subsequent tool calls,
+        dramatically improving performance (1-2s overhead eliminated).
+        
+        Example:
+            server = await MCPServerWorker.create(...)
+            await server.connect()  # Start persistent session
+            
+            # All calls reuse same process
+            result = await server.call_tool("read_file", {"path": "a.txt"})
+            result = await server.call_tool("read_file", {"path": "b.txt"})
+            
+            await server.disconnect()  # Clean shutdown
+        """
+        if self._connected:
+            return
+        
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+        except ImportError:
+            raise ImportError(
+                "MCP package not installed. Install with: pip install 'blackboard-core[mcp]'"
+            )
+        
+        server_params = StdioServerParameters(
+            command=self._command,
+            args=self._args,
+            env=self._env
+        )
+        
+        # Enter the stdio context (starts the process)
+        self._stdio_context = stdio_client(server_params)
+        read, write = await self._stdio_context.__aenter__()
+        
+        # Enter the session context
+        self._session_context = ClientSession(read, write)
+        self._session = await self._session_context.__aenter__()
+        await self._session.initialize()
+        
+        self._connected = True
+        logger.info(f"[{self._name}] Persistent connection established")
+    
+    async def disconnect(self) -> None:
+        """Close the persistent connection to the MCP server."""
+        if not self._connected:
+            return
+        
+        try:
+            if self._session_context:
+                await self._session_context.__aexit__(None, None, None)
+            if self._stdio_context:
+                await self._stdio_context.__aexit__(None, None, None)
+        except Exception as e:
+            logger.warning(f"[{self._name}] Error during disconnect: {e}")
+        finally:
+            self._session = None
+            self._session_context = None
+            self._stdio_context = None
+            self._connected = False
+            logger.info(f"[{self._name}] Disconnected")
+    
+    async def __aenter__(self) -> "MCPServerWorker":
+        """Async context manager entry - connect to server."""
+        await self.connect()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Async context manager exit - disconnect from server."""
+        await self.disconnect()
+    
+    async def call_tool(self, tool_name: str, arguments: Dict[str, Any] = None) -> str:
+        """
+        Call a tool directly on the persistent connection.
+        
+        This is the fastest way to call MCP tools after connect().
+        
+        Args:
+            tool_name: Name of the tool to call
+            arguments: Arguments for the tool
+            
+        Returns:
+            Tool output as string
+        """
+        if not self.is_connected:
+            raise RuntimeError(
+                f"[{self._name}] Not connected. Call connect() or use 'async with server:'"
+            )
+        
+        try:
+            from mcp.types import TextContent
+        except ImportError:
+            raise ImportError("MCP package not installed")
+        
+        result = await self._session.call_tool(tool_name, arguments=arguments or {})
+        
+        content_parts = []
+        for content_block in result.content:
+            if isinstance(content_block, TextContent):
+                content_parts.append(content_block.text)
+            else:
+                content_parts.append(str(content_block))
+        
+        return "\n".join(content_parts)
+
     
     def _generate_description(self) -> str:
         """Generate description from available tools."""

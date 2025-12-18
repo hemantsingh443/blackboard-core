@@ -1,9 +1,9 @@
 """
-Blackboard-Core SDK v1.2.0
+Blackboard-Core SDK
 
 A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems.
 
-## Quick Start (30 seconds)
+## Quick Start
 
 ```python
 from blackboard import Orchestrator, worker
@@ -18,16 +18,9 @@ orchestrator = Orchestrator(llm=llm, workers=[greet])
 result = orchestrator.run_sync(goal="Greet the user")
 ```
 
-## What's New in v1.2.0
-
-- **Model Context Protocol (MCP)**: Connect to external tools via MCP servers
-- **Dynamic Tool Expansion**: Each MCP tool exposed as separate LLM tool
-- **OpenTelemetry Integration**: Distributed tracing with span hierarchy
-- **Session Replay**: Record and replay sessions for debugging
-
 ## Namespace Organization
 
-Core API (always stable):
+Core API:
 - `from blackboard import Orchestrator, Worker, Blackboard, Artifact, Feedback`
 - `from blackboard import worker, critic`  # Decorators
 
@@ -81,7 +74,7 @@ from .decorators import (
 # VERSION
 # =============================================================================
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 # =============================================================================
 # CORE PUBLIC API (__all__)

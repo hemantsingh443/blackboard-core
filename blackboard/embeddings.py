@@ -399,14 +399,29 @@ class AsyncOpenAIEmbedder:
     
     # Sync fallback for EmbeddingModel protocol compatibility
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """Sync wrapper (blocks event loop - prefer async version)."""
+        """Sync wrapper. Safe inside existing event loops (uses thread pool)."""
         import asyncio
-        return asyncio.run(self.embed_documents_async(texts))
+        import concurrent.futures
+        try:
+            asyncio.get_running_loop()
+            # Inside existing loop - run in thread
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, self.embed_documents_async(texts))
+                return future.result()
+        except RuntimeError:
+            return asyncio.run(self.embed_documents_async(texts))
     
     def embed_query(self, text: str) -> List[float]:
-        """Sync wrapper (blocks event loop - prefer async version)."""
+        """Sync wrapper. Safe inside existing event loops (uses thread pool)."""
         import asyncio
-        return asyncio.run(self.embed_query_async(text))
+        import concurrent.futures
+        try:
+            asyncio.get_running_loop()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, self.embed_query_async(text))
+                return future.result()
+        except RuntimeError:
+            return asyncio.run(self.embed_query_async(text))
 
 
 def run_embedder_async(embedder: EmbeddingModel, text: str):

@@ -13,12 +13,14 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 7. [Tool Calling](#tool-calling)
 8. [Memory System](#memory-system)
 9. [Persistence](#persistence)
-10. [Model Context Protocol (v1.2.0)](#model-context-protocol)
-11. [OpenTelemetry (v1.2.0)](#opentelemetry)
-12. [Session Replay (v1.2.0)](#session-replay)
-13. [Events & Observability](#events--observability)
-14. [Error Handling](#error-handling)
-15. [Best Practices](#best-practices)
+10. [Model Context Protocol](#model-context-protocol)
+11. [OpenTelemetry](#opentelemetry)
+12. [Session Replay](#session-replay)
+13. [Terminal UI (v1.3.0)](#terminal-ui)
+14. [Production Fixes (v1.3.0)](#production-fixes)
+15. [Events & Observability](#events--observability)
+16. [Error Handling](#error-handling)
+17. [Best Practices](#best-practices)
 
 ---
 
@@ -704,6 +706,88 @@ diff = compare_sessions(original, replayed_result)
 
 print(f"Status match: {diff.status_match}")
 print(f"Differences: {diff.differences}")
+```
+
+---
+
+## Terminal UI
+
+Real-time terminal visualization with animated progress and markdown rendering (v1.3.0):
+
+```python
+from blackboard.tui import BlackboardTUI, watch
+
+# Option 1: Quick start with watch()
+result = watch(orchestrator, goal="Research and write about AI")
+
+# Option 2: Manual control
+tui = BlackboardTUI(orchestrator.event_bus)
+with tui.live():
+    result = await orchestrator.run(goal="...")
+    tui.print_summary(result)
+```
+
+### TUI Features
+
+- **Activity Log**: Real-time event ticker with timestamps
+- **Animated Spinners**: Visual worker progress indicators
+- **Live Markdown**: Artifacts rendered with proper formatting
+- **Responsive Layout**: Adapts to terminal size automatically
+- **Dynamic Borders**: Colors change based on state (thinking/running/done/failed)
+
+---
+
+## Production Fixes
+
+Critical production fixes introduced in v1.3.0:
+
+### Event Loop Safety
+
+The SDK now safely executes inside existing event loops (FastAPI, Jupyter, nested async):
+
+```python
+# Works in FastAPI routes, Jupyter notebooks, etc.
+result = orchestrator.run_sync(goal="...")  # No RuntimeError
+
+# Also safe in TUI
+from blackboard.tui import watch
+result = watch(orchestrator, goal="...")
+```
+
+### Smart Context Management
+
+Token-aware truncation prevents LLM context overflow:
+
+```python
+# Automatically truncates large states to fit context window
+context = state.to_context_string(max_tokens=4000, chars_per_token=4)
+
+# Priority: Goal > Feedback > Artifacts (with head/tail preview)
+```
+
+### MCP Persistent Sessions
+
+MCP servers now maintain persistent connections for 90% faster tool calls:
+
+```python
+async with MCPServerWorker.create(...) as server:
+    # All tool calls reuse the same session
+    workers = server.expand_to_workers()
+    orchestrator = Orchestrator(llm=llm, workers=workers)
+    await orchestrator.run(goal="...")
+```
+
+### UsageTracker Memory Management
+
+Prevent unbounded memory growth in long-running agents:
+
+```python
+from blackboard.usage import UsageTracker
+
+tracker = UsageTracker(
+    max_records=10000,  # Auto-eviction after 10k records
+    on_flush=lambda records: save_to_db(records)  # Callback before eviction
+)
 ```
 
 ---
