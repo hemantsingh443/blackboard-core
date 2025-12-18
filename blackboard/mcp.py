@@ -4,18 +4,26 @@ Model Context Protocol (MCP) Integration
 Provides a rock-solid MCP client that wraps MCP servers as Workers.
 Enables connecting to external tools (Filesystem, GitHub, Postgres) without writing code.
 
+DYNAMIC TOOL EXPANSION:
+Each MCP tool is exposed as a separate Worker, giving the LLM direct access
+to individual tool schemas (not a router pattern).
+
 Example:
     from blackboard import Orchestrator
     from blackboard.mcp import MCPServerWorker
     
     # Connect to filesystem MCP server
-    fs_worker = await MCPServerWorker.create(
+    fs_server = await MCPServerWorker.create(
         name="Filesystem",
         command="npx",
         args=["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
     )
     
-    orchestrator = Orchestrator(llm=llm, workers=[fs_worker])
+    # DYNAMIC EXPANSION: Each MCP tool becomes a separate Worker
+    tool_workers = fs_server.expand_to_workers()
+    # -> [MCPToolWorker(read_file), MCPToolWorker(write_file), ...]
+    
+    orchestrator = Orchestrator(llm=llm, workers=tool_workers)
 """
 
 import asyncio
@@ -25,6 +33,7 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .protocols import Worker, WorkerOutput, WorkerInput
 from .state import Artifact, Blackboard
+from .tools import ToolDefinition, ToolParameter
 
 if TYPE_CHECKING:
     from mcp import ClientSession
@@ -39,12 +48,180 @@ class MCPTool:
     name: str
     description: str
     input_schema: Dict[str, Any]
+    
+    def to_tool_definition(self) -> ToolDefinition:
+        """
+        Convert this MCP tool to a ToolDefinition.
+        
+        This enables the LLM to see the full schema with proper types.
+        """
+        parameters = []
+        
+        # Parse JSON Schema format from MCP
+        props = self.input_schema.get("properties", {})
+        required_fields = self.input_schema.get("required", [])
+        
+        for param_name, param_info in props.items():
+            # Map JSON Schema types to our types
+            json_type = param_info.get("type", "string")
+            if isinstance(json_type, list):
+                json_type = json_type[0] if json_type else "string"
+            
+            parameters.append(ToolParameter(
+                name=param_name,
+                type=json_type,
+                description=param_info.get("description", f"The {param_name} parameter"),
+                required=param_name in required_fields,
+                enum=param_info.get("enum"),
+                default=param_info.get("default")
+            ))
+        
+        return ToolDefinition(
+            name=self.name,
+            description=self.description,
+            parameters=parameters
+        )
 
 
 class MCPWorkerInput(WorkerInput):
-    """Input for MCP worker that specifies which tool to call."""
-    tool_name: str = ""
-    arguments: Dict[str, Any] = {}
+    """Input for MCP tool worker."""
+    # Dynamic arguments will be passed from LLM
+    pass
+
+
+class MCPToolWorker(Worker):
+    """
+    A single MCP tool exposed as a Worker.
+    
+    This is created by MCPServerWorker.expand_to_workers() and represents
+    one specific tool from an MCP server. The LLM sees this tool directly
+    with its full schema - no router pattern.
+    
+    Args:
+        server: Parent MCPServerWorker
+        tool: The specific MCPTool this worker represents
+    """
+    
+    def __init__(self, server: "MCPServerWorker", tool: MCPTool):
+        self._server = server
+        self._tool = tool
+    
+    @property
+    def name(self) -> str:
+        # Use namespaced name to avoid collisions: "Filesystem:read_file"
+        return f"{self._server.name}:{self._tool.name}"
+    
+    @property
+    def description(self) -> str:
+        return self._tool.description
+    
+    @property
+    def parallel_safe(self) -> bool:
+        return False  # MCP servers are stateful
+    
+    @property
+    def tool_definition(self) -> ToolDefinition:
+        """Get the ToolDefinition for direct LLM exposure."""
+        return self._tool.to_tool_definition()
+    
+    def get_tool_definitions(self) -> List[ToolDefinition]:
+        """
+        Protocol method: Return tool definitions for this worker.
+        
+        This is what the Orchestrator calls to get tools for the LLM.
+        """
+        return [self._tool.to_tool_definition()]
+    
+    async def run(
+        self,
+        state: Blackboard,
+        inputs: Optional[WorkerInput] = None
+    ) -> WorkerOutput:
+        """
+        Execute this specific MCP tool.
+        
+        Arguments are extracted from inputs and passed to the MCP server.
+        """
+        try:
+            from mcp import ClientSession, StdioServerParameters
+            from mcp.client.stdio import stdio_client
+            from mcp.types import TextContent
+        except ImportError:
+            return WorkerOutput(
+                artifact=Artifact(
+                    type="error",
+                    content="MCP package not installed",
+                    creator=self.name
+                )
+            )
+        
+        # Extract arguments from inputs
+        arguments = {}
+        if inputs:
+            # Get all attributes from inputs that match tool schema
+            for key in self._tool.input_schema.get("properties", {}).keys():
+                if hasattr(inputs, key):
+                    arguments[key] = getattr(inputs, key)
+            
+            # Also try instructions as fallback for simple tools
+            if not arguments and hasattr(inputs, 'instructions'):
+                instructions = getattr(inputs, 'instructions', '')
+                if instructions:
+                    # Check if tool has a single string parameter
+                    props = self._tool.input_schema.get("properties", {})
+                    if len(props) == 1:
+                        param_name = list(props.keys())[0]
+                        arguments[param_name] = instructions
+        
+        # Connect and call tool
+        server_params = StdioServerParameters(
+            command=self._server._command,
+            args=self._server._args,
+            env=self._server._env
+        )
+        
+        try:
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    
+                    result = await session.call_tool(self._tool.name, arguments=arguments)
+                    
+                    # Extract content
+                    content_parts = []
+                    for content_block in result.content:
+                        if isinstance(content_block, TextContent):
+                            content_parts.append(content_block.text)
+                        else:
+                            content_parts.append(str(content_block))
+                    
+                    content = "\n".join(content_parts)
+                    
+                    return WorkerOutput(
+                        artifact=Artifact(
+                            type="mcp_result",
+                            content=content,
+                            creator=self.name,
+                            metadata={
+                                "tool": self._tool.name,
+                                "server": self._server.name,
+                                "structured": result.structuredContent
+                            }
+                        )
+                    )
+                    
+        except Exception as e:
+            logger.error(f"[{self.name}] Tool call failed: {e}")
+            return WorkerOutput(
+                artifact=Artifact(
+                    type="error",
+                    content=f"MCP tool '{self._tool.name}' failed: {str(e)}",
+                    creator=self.name
+                )
+            )
+    
+    def __repr__(self) -> str:
+        return f"MCPToolWorker({self.name})"
 
 
 class MCPServerWorker(Worker):
@@ -120,6 +297,41 @@ class MCPServerWorker(Worker):
         tool_names = [t.name for t in self._tools[:5]]
         suffix = f" (+{len(self._tools) - 5} more)" if len(self._tools) > 5 else ""
         return f"MCP Server with tools: {', '.join(tool_names)}{suffix}"
+    
+    def expand_to_workers(self) -> List["MCPToolWorker"]:
+        """
+        DYNAMIC TOOL EXPANSION: Create individual workers for each MCP tool.
+        
+        This is the production-grade approach. Instead of the LLM seeing
+        one "router" worker, it sees each tool as a separate worker with
+        its full schema.
+        
+        Returns:
+            List of MCPToolWorker instances, one per MCP tool
+            
+        Example:
+            fs_server = await MCPServerWorker.create(...)
+            
+            # OLD (router pattern - bad):
+            # workers = [fs_server]  # LLM sees: Filesystem(tool_name=..., args=...)
+            
+            # NEW (dynamic expansion - good):
+            workers = fs_server.expand_to_workers()
+            # LLM sees: read_file(path=...), write_file(path=..., content=...), etc.
+        """
+        return [MCPToolWorker(self, tool) for tool in self._tools]
+    
+    def get_tool_definitions(self) -> List[ToolDefinition]:
+        """
+        Get ToolDefinitions for all tools in this MCP server.
+        
+        Used by Orchestrator for native tool calling.
+        """
+        return [tool.to_tool_definition() for tool in self._tools]
+    
+    def to_tool_definitions(self) -> List[ToolDefinition]:
+        """Alias for get_tool_definitions (for compatibility)."""
+        return self.get_tool_definitions()
     
     @classmethod
     async def create(

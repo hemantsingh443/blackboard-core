@@ -215,6 +215,112 @@ class TestMCPRegistry:
         assert "1 servers" in repr(registry)
 
 
+class TestMCPToolWorker:
+    """Tests for MCPToolWorker dynamic expansion."""
+    
+    def test_expand_to_workers(self):
+        """Test expanding server to individual tool workers."""
+        from blackboard.mcp import MCPToolWorker
+        
+        server = MCPServerWorker(
+            name="TestServer",
+            command="test",
+            args=[],
+            tools=[
+                MCPTool(name="read_file", description="Read a file", input_schema={}),
+                MCPTool(name="write_file", description="Write a file", input_schema={})
+            ]
+        )
+        
+        workers = server.expand_to_workers()
+        
+        assert len(workers) == 2
+        assert isinstance(workers[0], MCPToolWorker)
+        assert workers[0].name == "TestServer:read_file"
+        assert workers[1].name == "TestServer:write_file"
+    
+    def test_tool_worker_properties(self):
+        """Test MCPToolWorker properties."""
+        from blackboard.mcp import MCPToolWorker
+        
+        server = MCPServerWorker(
+            name="FS",
+            command="test",
+            args=[],
+            tools=[MCPTool(
+                name="read",
+                description="Read content",
+                input_schema={"type": "object", "properties": {"path": {"type": "string"}}}
+            )]
+        )
+        
+        worker = server.expand_to_workers()[0]
+        
+        assert worker.name == "FS:read"
+        assert worker.description == "Read content"
+        assert worker.parallel_safe is False
+    
+    def test_get_tool_definitions(self):
+        """Test getting tool definitions."""
+        from blackboard.tools import ToolDefinition
+        
+        server = MCPServerWorker(
+            name="Server",
+            command="test",
+            args=[],
+            tools=[MCPTool(
+                name="add",
+                description="Add numbers",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "number", "description": "First number"},
+                        "b": {"type": "number", "description": "Second number"}
+                    },
+                    "required": ["a", "b"]
+                }
+            )]
+        )
+        
+        definitions = server.get_tool_definitions()
+        
+        assert len(definitions) == 1
+        assert isinstance(definitions[0], ToolDefinition)
+        assert definitions[0].name == "add"
+        assert len(definitions[0].parameters) == 2
+    
+    def test_mcp_tool_to_definition(self):
+        """Test MCPTool.to_tool_definition conversion."""
+        from blackboard.tools import ToolDefinition
+        
+        tool = MCPTool(
+            name="search",
+            description="Search for files",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "limit": {"type": "integer", "description": "Max results", "default": 10}
+                },
+                "required": ["query"]
+            }
+        )
+        
+        definition = tool.to_tool_definition()
+        
+        assert definition.name == "search"
+        assert definition.description == "Search for files"
+        assert len(definition.parameters) == 2
+        
+        query_param = next(p for p in definition.parameters if p.name == "query")
+        assert query_param.type == "string"
+        assert query_param.required is True
+        
+        limit_param = next(p for p in definition.parameters if p.name == "limit")
+        assert limit_param.type == "integer"
+        assert limit_param.required is False
+
+
 class TestMCPImport:
     """Tests for MCP module imports."""
     
