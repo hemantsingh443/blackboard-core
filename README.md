@@ -31,75 +31,47 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 - **Centralized State** - All agents share a typed Pydantic state model
 - **LLM Orchestration** - A supervisor LLM decides which worker runs next
 - **Async-First** - Built for high-performance async/await patterns
-- **Middleware System** - Budget tracking, logging, human approval, auto-summarization
+- **LiteLLM Integration** - 100+ LLM providers via `LiteLLMClient`
+- **Model Context Protocol** - Connect to MCP servers for external tools (v1.2.0)
+- **OpenTelemetry** - Distributed tracing with span hierarchy (v1.2.0)
+- **Session Replay** - Record and replay for debugging (v1.2.0)
+- **Middleware System** - Budget tracking, logging, human approval
 - **Tool Calling** - Native support for OpenAI-style function calling
-- **Persistence** - Save/resume sessions with optimistic locking
 - **Memory System** - Vector memory with pluggable embeddings
-- **Parallel Execution** - Run independent workers concurrently
 
 ## Installation
 
 ```bash
 pip install blackboard-core
+
+# Optional extras
+pip install blackboard-core[mcp]        # Model Context Protocol
+pip install blackboard-core[telemetry]  # OpenTelemetry
+pip install blackboard-core[chroma]     # ChromaDB for memory
 ```
 
 ## Quick Start
 
 ```python
-import asyncio
-from blackboard import Orchestrator, Worker, WorkerOutput, Artifact, Blackboard
+from blackboard import Orchestrator, worker
+from blackboard.llm import LiteLLMClient
 
-# 1. Define your workers
-class Writer(Worker):
-    name = "Writer"
-    description = "Generates text content based on the goal"
-    
-    async def run(self, state: Blackboard, inputs=None) -> WorkerOutput:
-        # Your LLM call here
-        content = f"Generated content for: {state.goal}"
-        return WorkerOutput(
-            artifact=Artifact(type="text", content=content, creator=self.name)
-        )
+# Define workers with decorators
+@worker(name="Writer", description="Writes content")
+def write(topic: str) -> str:
+    return f"Article about {topic}..."
 
-class Critic(Worker):
-    name = "Critic"
-    description = "Reviews content and provides feedback"
-    
-    async def run(self, state: Blackboard, inputs=None) -> WorkerOutput:
-        artifact = state.get_last_artifact()
-        # Your review logic here
-        return WorkerOutput(
-            feedback=Feedback(
-                source=self.name,
-                critique="Looks good!",
-                passed=True,
-                artifact_id=artifact.id
-            )
-        )
+@worker(name="Critic", description="Reviews content")  
+def critique(content: str) -> str:
+    return "Approved!" if len(content) > 50 else "Needs more detail"
 
-# 2. Create an LLM client (implement the LLMClient protocol)
-class MyLLM:
-    async def generate(self, prompt: str) -> str:
-        # Your LLM API call (OpenAI, Anthropic, etc.)
-        return '{"action": "call", "worker": "Writer", "reasoning": "Start writing"}'
+# Create orchestrator
+llm = LiteLLMClient(model="gpt-4o")  # Auto-detects API key
+orchestrator = Orchestrator(llm=llm, workers=[write, critique])
 
-# 3. Run the orchestrator
-async def main():
-    orchestrator = Orchestrator(
-        llm=MyLLM(),
-        workers=[Writer(), Critic()],
-        verbose=True
-    )
-    
-    result = await orchestrator.run(
-        goal="Write a haiku about programming",
-        max_steps=10
-    )
-    
-    print(f"Final status: {result.status}")
-    print(f"Artifacts: {[a.content for a in result.artifacts]}")
-
-asyncio.run(main())
+# Run
+result = orchestrator.run_sync(goal="Write about AI safety")
+print(result.artifacts[-1].content)
 ```
 
 ## Core Concepts
@@ -112,6 +84,51 @@ asyncio.run(main())
 | **Supervisor** | The LLM that decides which worker to call next |
 | **Artifact** | Versioned output produced by a worker |
 | **Feedback** | Review/critique of an artifact |
+
+## What's New in v1.2.0
+
+### Model Context Protocol (MCP)
+
+```python
+from blackboard.mcp import MCPServerWorker
+
+# Connect to filesystem MCP server
+fs = await MCPServerWorker.create(
+    name="Filesystem",
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-filesystem", "/path"]
+)
+
+# Each tool exposed as separate worker
+workers = fs.expand_to_workers()  # read_file, write_file, etc.
+orchestrator = Orchestrator(llm=llm, workers=workers)
+```
+
+### OpenTelemetry Tracing
+
+```python
+from blackboard.telemetry import OpenTelemetryMiddleware
+
+otel = OpenTelemetryMiddleware(service_name="my-agent")
+orchestrator = Orchestrator(llm=llm, workers=workers, middleware=[otel])
+# Creates spans: orchestrator.run → step.N → worker.Name
+```
+
+### Session Replay
+
+```python
+from blackboard.replay import SessionRecorder, ReplayOrchestrator
+
+# Record
+recorder = SessionRecorder()
+recorder.attach(orchestrator.event_bus)
+result = await orchestrator.run(goal="...")
+recorder.save("session.json")
+
+# Replay (no API calls!)
+replay = ReplayOrchestrator.from_file("session.json", workers=workers)
+replayed = await replay.run()
+```
 
 ## Advanced Features
 
@@ -128,17 +145,6 @@ orchestrator = Orchestrator(
         HumanApprovalMiddleware(require_approval_for=["Deployer"])
     ]
 )
-```
-
-### Tool Calling (OpenAI-style)
-
-```python
-from blackboard.tools import ToolCallingLLMClient
-
-class MyToolLLM(ToolCallingLLMClient):
-    async def generate_with_tools(self, prompt, tools):
-        # Use OpenAI function calling
-        ...
 ```
 
 ### Memory System

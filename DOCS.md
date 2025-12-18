@@ -13,9 +13,12 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 7. [Tool Calling](#tool-calling)
 8. [Memory System](#memory-system)
 9. [Persistence](#persistence)
-10. [Events & Observability](#events--observability)
-11. [Error Handling](#error-handling)
-12. [Best Practices](#best-practices)
+10. [Model Context Protocol (v1.2.0)](#model-context-protocol)
+11. [OpenTelemetry (v1.2.0)](#opentelemetry)
+12. [Session Replay (v1.2.0)](#session-replay)
+13. [Events & Observability](#events--observability)
+14. [Error Handling](#error-handling)
+15. [Best Practices](#best-practices)
 
 ---
 
@@ -579,6 +582,128 @@ class MyFactory:
         return "Analyzes data" if name == "DataAnalyzer" else "Processes images"
 
 registry = LazyWorkerRegistry(factory=MyFactory())
+```
+
+---
+
+## Model Context Protocol
+
+Connect to external tools via MCP servers (v1.2.0):
+
+```python
+from blackboard.mcp import MCPServerWorker
+
+# Connect to filesystem MCP server
+fs = await MCPServerWorker.create(
+    name="Filesystem",
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-filesystem", "/path/to/dir"]
+)
+
+# DYNAMIC EXPANSION: Each MCP tool becomes a separate Worker
+workers = fs.expand_to_workers()
+# -> [MCPToolWorker(read_file), MCPToolWorker(write_file), ...]
+
+orchestrator = Orchestrator(llm=llm, workers=workers)
+# LLM sees: Filesystem:read_file(path), Filesystem:write_file(path, content), etc.
+```
+
+### MCPRegistry
+
+```python
+from blackboard.mcp import MCPRegistry
+
+registry = MCPRegistry()
+await registry.add("fs", command="npx", args=["@mcp/server-filesystem", "/"])
+await registry.add("github", command="npx", args=["@mcp/server-github"])
+
+# Get all workers
+all_workers = registry.get_workers()
+orchestrator = Orchestrator(llm=llm, workers=all_workers)
+```
+
+---
+
+## OpenTelemetry
+
+Distributed tracing with span hierarchy (v1.2.0):
+
+```python
+from blackboard.telemetry import OpenTelemetryMiddleware
+
+# Basic usage
+otel = OpenTelemetryMiddleware(service_name="my-agent")
+orchestrator = Orchestrator(llm=llm, workers=workers, middleware=[otel])
+
+# Creates span hierarchy:
+# orchestrator.run
+# ├── step.1
+# │   └── worker.Writer
+# ├── step.2
+# │   └── worker.Critic
+# └── ...
+```
+
+### With Jaeger/Zipkin
+
+```python
+from opentelemetry.exporter.jaeger.thrift import JaegerExporter
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry import trace
+
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(JaegerExporter()))
+trace.set_tracer_provider(provider)
+
+otel = OpenTelemetryMiddleware(service_name="my-agent")
+```
+
+### Metrics Collector (no OTEL)
+
+```python
+from blackboard.telemetry import MetricsCollector
+
+collector = MetricsCollector()
+orchestrator.event_bus.subscribe_all(collector.on_event)
+
+result = await orchestrator.run(goal="...")
+print(collector.get_summary())
+# {"duration_seconds": 5.2, "total_steps": 3, "total_worker_calls": 5}
+```
+
+---
+
+## Session Replay
+
+Record and replay sessions for debugging (v1.2.0):
+
+```python
+from blackboard.replay import SessionRecorder, RecordingLLMClient, ReplayOrchestrator
+
+# 1. Record a session
+recorder = SessionRecorder()
+recording_llm = RecordingLLMClient(llm, recorder)
+
+orchestrator = Orchestrator(llm=recording_llm, workers=workers)
+result = await orchestrator.run(goal="Write a poem")
+recorder.save("session.json")
+
+# 2. Replay (no API calls!)
+replay = ReplayOrchestrator.from_file("session.json", workers=workers)
+replayed_result = await replay.run()
+```
+
+### Compare Sessions
+
+```python
+from blackboard.replay import compare_sessions, RecordedSession
+
+original = RecordedSession.load("session.json")
+diff = compare_sessions(original, replayed_result)
+
+print(f"Status match: {diff.status_match}")
+print(f"Differences: {diff.differences}")
 ```
 
 ---

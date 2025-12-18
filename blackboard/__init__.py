@@ -1,5 +1,5 @@
 """
-Blackboard-Core SDK v1.1.0
+Blackboard-Core SDK v1.2.0
 
 A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems.
 
@@ -18,6 +18,13 @@ orchestrator = Orchestrator(llm=llm, workers=[greet])
 result = orchestrator.run_sync(goal="Greet the user")
 ```
 
+## What's New in v1.2.0
+
+- **Model Context Protocol (MCP)**: Connect to external tools via MCP servers
+- **Dynamic Tool Expansion**: Each MCP tool exposed as separate LLM tool
+- **OpenTelemetry Integration**: Distributed tracing with span hierarchy
+- **Session Replay**: Record and replay sessions for debugging
+
 ## Namespace Organization
 
 Core API (always stable):
@@ -26,9 +33,11 @@ Core API (always stable):
 
 Advanced features (opt-in submodules):
 - `from blackboard.llm import LiteLLMClient`
+- `from blackboard.mcp import MCPServerWorker, MCPRegistry`
+- `from blackboard.telemetry import OpenTelemetryMiddleware`
+- `from blackboard.replay import SessionRecorder, ReplayOrchestrator`
 - `from blackboard.middleware import BudgetMiddleware, HumanApprovalMiddleware`
 - `from blackboard.tui import BlackboardTUI, watch`
-- `from blackboard.persistence import RedisPersistence, JSONFilePersistence`
 """
 
 # =============================================================================
@@ -56,6 +65,8 @@ from .protocols import (
 from .core import (
     Orchestrator,
     LLMClient,
+    LLMResponse,
+    LLMUsage,
     run_blackboard,
     run_blackboard_sync,
 )
@@ -70,7 +81,7 @@ from .decorators import (
 # VERSION
 # =============================================================================
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 # =============================================================================
 # CORE PUBLIC API (__all__)
@@ -89,12 +100,14 @@ __all__ = [
     "WorkerOutput",
     "WorkerInput",
     "WorkerRegistry",
-    # Decorators (new!)
+    # Decorators
     "worker",
     "critic",
     # Orchestrator (stable)
     "Orchestrator",
     "LLMClient",
+    "LLMResponse",
+    "LLMUsage",
     "run_blackboard",
     "run_blackboard_sync",
     # Version
@@ -104,12 +117,29 @@ __all__ = [
 # =============================================================================
 # ADVANCED FEATURES - Import from submodules
 # =============================================================================
-# from blackboard.llm import LiteLLMClient, create_llm
-# from blackboard.decorators import worker, critic
-# from blackboard.tui import BlackboardTUI, watch
-# from blackboard.middleware import BudgetMiddleware, HumanApprovalMiddleware
-# from blackboard.events import EventBus, Event, EventType
-# from blackboard.usage import UsageTracker, LLMResponse, LLMUsage
-# from blackboard.memory import Memory, SimpleVectorMemory
-# from blackboard.persistence import RedisPersistence, JSONFilePersistence
-
+# 
+# LiteLLM Integration (100+ models):
+#   from blackboard.llm import LiteLLMClient, create_llm
+#
+# Model Context Protocol (v1.2.0):
+#   from blackboard.mcp import MCPServerWorker, MCPToolWorker, MCPRegistry
+#
+# Observability (v1.2.0):
+#   from blackboard.telemetry import OpenTelemetryMiddleware, MetricsCollector
+#   from blackboard.replay import SessionRecorder, ReplayOrchestrator
+#
+# TUI Visualization:
+#   from blackboard.tui import BlackboardTUI, watch
+#
+# Middleware:
+#   from blackboard.middleware import BudgetMiddleware, HumanApprovalMiddleware
+#
+# Events:
+#   from blackboard.events import EventBus, Event, EventType
+#
+# Memory:
+#   from blackboard.memory import Memory, SimpleVectorMemory, MemoryWorker
+#   from blackboard.embeddings import TFIDFEmbedder, LocalEmbedder, OpenAIEmbedder
+#
+# Persistence:
+#   from blackboard.persistence import RedisPersistence, JSONFilePersistence
