@@ -253,7 +253,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         self._tool_definitions: List[ToolDefinition] = []
         if self._supports_tool_calling and use_tool_calling:
             try:
-                self._tool_definitions = workers_to_tool_definitions(workers)
+                self._tool_definitions = self._build_tool_definitions(workers)
                 self._tool_definitions.extend([DONE_TOOL, FAIL_TOOL])
                 
                 # Validate tool definitions if strict mode
@@ -278,6 +278,33 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             handler.setFormatter(logging.Formatter('[%(name)s] %(message)s'))
             logger.addHandler(handler)
             logger.setLevel(logging.DEBUG)
+
+    def _build_tool_definitions(self, workers: List[Worker]) -> List[ToolDefinition]:
+        """
+        Build tool definitions from workers.
+        
+        This checks if workers provide their own get_tool_definitions() method
+        (like MCPToolWorker) and uses those. This enables dynamic tool expansion
+        where each MCP tool becomes a separate LLM tool with proper schema.
+        
+        For workers without get_tool_definitions(), falls back to auto-generating
+        a ToolDefinition from the worker's input_schema.
+        """
+        definitions = []
+        
+        for worker in workers:
+            # Check if worker provides custom tool definitions (dynamic tools)
+            if hasattr(worker, 'get_tool_definitions') and callable(worker.get_tool_definitions):
+                # Worker provides its own tool definitions
+                worker_defs = worker.get_tool_definitions()
+                if worker_defs:
+                    definitions.extend(worker_defs)
+                    continue
+            
+            # Fall back to auto-generating from worker
+            definitions.append(worker_to_tool_definition(worker))
+        
+        return definitions
 
     async def run(
         self,
