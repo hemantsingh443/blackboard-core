@@ -94,12 +94,12 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
             import litellm
             litellm.api_key = api_key
     
-    def generate(self, prompt: str) -> LLMResponse:
+    async def generate(self, prompt: str) -> LLMResponse:
         """
-        Generate a response synchronously.
+        Generate a response.
         
-        NOTE: This method is synchronous and will block. For async contexts,
-        use agenerate() instead which is non-blocking.
+        NOTE: This is async to avoid blocking the event loop.
+        The Orchestrator handles async returns automatically.
         
         Args:
             prompt: The prompt to send to the LLM
@@ -107,23 +107,10 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
         Returns:
             LLMResponse with content and usage stats
         """
-        import asyncio
-        
-        # If we're in an async context, run async version in executor
-        try:
-            loop = asyncio.get_running_loop()
-            # We're in async context - use thread to avoid blocking
-            return asyncio.run_coroutine_threadsafe(
-                self.agenerate(prompt), loop
-            ).result()
-        except RuntimeError:
-            # No running loop - use sync version directly
-            pass
-        
         import litellm
         
         try:
-            response = litellm.completion(
+            response = await litellm.acompletion(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self.temperature,
