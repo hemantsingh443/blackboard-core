@@ -98,12 +98,28 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
         """
         Generate a response synchronously.
         
+        NOTE: This method is synchronous and will block. For async contexts,
+        use agenerate() instead which is non-blocking.
+        
         Args:
             prompt: The prompt to send to the LLM
             
         Returns:
             LLMResponse with content and usage stats
         """
+        import asyncio
+        
+        # If we're in an async context, run async version in executor
+        try:
+            loop = asyncio.get_running_loop()
+            # We're in async context - use thread to avoid blocking
+            return asyncio.run_coroutine_threadsafe(
+                self.agenerate(prompt), loop
+            ).result()
+        except RuntimeError:
+            # No running loop - use sync version directly
+            pass
+        
         import litellm
         
         try:
@@ -201,16 +217,18 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
             logger.error(f"LiteLLM streaming error: {e}")
             raise
     
-    def generate_with_tools(
+    async def generate_with_tools(
         self,
         prompt: str,
         tools: List[ToolDefinition]
     ) -> Union[str, List[ToolCall]]:
         """
-        Generate a response with tool calling support.
+        Generate a response with tool calling support (async).
         
         Uses LiteLLM's native function calling to let the model
         call tools directly, avoiding JSON parsing.
+        
+        NOTE: This is now async to avoid blocking the event loop.
         
         Args:
             prompt: The prompt to send
@@ -225,7 +243,7 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
         tool_defs = [tool.to_openai_format() for tool in tools]
         
         try:
-            response = litellm.completion(
+            response = await litellm.acompletion(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 tools=tool_defs,
