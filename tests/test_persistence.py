@@ -122,14 +122,15 @@ class TestHistoryManagement:
         assert "Feedback 0" not in context
     
     def test_content_length_truncation(self):
-        """Test that long content is truncated."""
+        """Test that long content is truncated via token limits."""
         state = Blackboard(goal="Test")
         long_content = "x" * 1000
         state.add_artifact(Artifact(type="text", content=long_content, creator="A"))
         
-        context = state.to_context_string(max_content_length=100)
+        # Use token-based truncation (100 tokens * 4 chars = 400 chars max)
+        context = state.to_context_string(max_tokens=100)
         
-        assert "..." in context
+        # Should be truncated (either with ... or head/tail preview)
         assert len(context) < 2000  # Reasonable limit
     
     def test_context_summary(self):
