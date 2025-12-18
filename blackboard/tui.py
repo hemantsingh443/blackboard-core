@@ -286,6 +286,9 @@ def watch(orchestrator, goal: str, **kwargs) -> "Blackboard":
     """
     Convenience function to run orchestrator with TUI visualization.
     
+    Creates a shared Blackboard state that both the TUI and Orchestrator
+    reference. Since Blackboard is mutable, the TUI sees live updates.
+    
     Args:
         orchestrator: Orchestrator instance
         goal: Goal to accomplish
@@ -300,14 +303,23 @@ def watch(orchestrator, goal: str, **kwargs) -> "Blackboard":
         result = watch(orchestrator, goal="Write a poem")
     """
     import asyncio
+    from .state import Blackboard
     
+    # Create state BEFORE running - TUI holds reference to this mutable object
+    state = Blackboard(goal=goal)
+    
+    # Create TUI and give it the shared state reference
     tui = BlackboardTUI(orchestrator.event_bus)
+    tui.update_state(state)  # TUI now references the same object
     
     async def run_with_tui():
         with tui.live():
-            result = await orchestrator.run(goal=goal, **kwargs)
+            # Pass the pre-created state to orchestrator
+            # Orchestrator mutates this same object, TUI sees changes
+            result = await orchestrator.run(state=state, **kwargs)
             tui.update_state(result)
         tui.print_summary(result)
         return result
     
     return asyncio.run(run_with_tui())
+
