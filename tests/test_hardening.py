@@ -358,3 +358,72 @@ class TestGracefulShutdown:
         # Simulate signal
         orch._handle_shutdown_signal(15, None)  # SIGTERM
         assert orch._shutdown_requested is True
+
+
+# =============================================================================
+# Supervisor Schema Tests
+# =============================================================================
+
+class TestSupervisorSchema:
+    """Tests for supervisor prompt schema improvements."""
+    
+    def test_simple_prompts_uses_simple_prompt(self):
+        """simple_prompts=True should use SIMPLE_SUPERVISOR_PROMPT."""
+        llm = MockLLM([])
+        config = BlackboardConfig(simple_prompts=True)
+        
+        orch = Orchestrator(
+            llm=llm,
+            workers=[SimpleWorker()],
+            config=config
+        )
+        
+        assert "SIMPLE" not in orch.SUPERVISOR_SYSTEM_PROMPT
+        assert "Reply with a single JSON" in orch.supervisor_prompt
+    
+    def test_default_uses_full_prompt(self):
+        """Default config should use full SUPERVISOR_SYSTEM_PROMPT."""
+        llm = MockLLM([])
+        
+        orch = Orchestrator(
+            llm=llm,
+            workers=[SimpleWorker()]
+        )
+        
+        assert "Independent Worker Calls" in orch.supervisor_prompt
+    
+    def test_pydantic_schema_available(self):
+        """Pydantic schemas should be importable if pydantic is installed."""
+        try:
+            from blackboard.schemas import (
+                PYDANTIC_AVAILABLE,
+                get_supervisor_json_schema,
+                get_simple_prompt_schema,
+                validate_supervisor_response
+            )
+            
+            if PYDANTIC_AVAILABLE:
+                schema = get_supervisor_json_schema()
+                assert "oneOf" in schema or "examples" in schema
+                
+                # Test validation
+                valid_call = {"action": "call", "worker": "Test", "instructions": "Do it"}
+                error = validate_supervisor_response(valid_call)
+                assert error is None
+                
+                # Test invalid
+                invalid = {"action": "unknown"}
+                error = validate_supervisor_response(invalid)
+                assert error is not None
+            
+        except ImportError:
+            pass  # Pydantic not installed
+    
+    def test_simple_prompt_schema_text(self):
+        """get_simple_prompt_schema should return readable text."""
+        from blackboard.schemas import get_simple_prompt_schema
+        
+        schema_text = get_simple_prompt_schema()
+        assert "call" in schema_text
+        assert "done" in schema_text
+        assert "fail" in schema_text

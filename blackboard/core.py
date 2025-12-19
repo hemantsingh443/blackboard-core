@@ -210,6 +210,34 @@ Each worker reads state at call time - workers will NOT see other workers' resul
 6. Don't call the same worker twice in a row without new information
 '''
 
+    # Simplified prompt for weaker models (used when simple_prompts=True)
+    SIMPLE_SUPERVISOR_PROMPT = '''You are a Supervisor managing AI workers. Your job is to decide which worker to call next.
+
+## Available Workers
+{worker_list}
+
+## Your Response
+Reply with a single JSON object. Pick ONE format:
+
+CALL A WORKER:
+{{"action": "call", "worker": "WorkerName", "instructions": "what to do"}}
+
+CALL MULTIPLE (only if independent):
+{{"action": "call_independent", "calls": [{{"worker": "A"}}, {{"worker": "B"}}]}}
+
+DONE:
+{{"action": "done", "reasoning": "why complete"}}
+
+FAILED:
+{{"action": "fail", "reasoning": "why failed"}}
+
+Rules:
+- Call Generator first if no artifact exists
+- Call Critic if artifact exists but no feedback
+- If feedback says passed=true, reply done
+- If feedback says passed=false, call Generator with the feedback
+'''
+
     def __init__(
         self,
         llm: LLMClient,
@@ -302,7 +330,15 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             "feedback": 20,
             "steps": 50
         })
-        self.supervisor_prompt = supervisor_prompt or self.SUPERVISOR_SYSTEM_PROMPT
+        
+        # Select supervisor prompt based on simple_prompts setting
+        if supervisor_prompt:
+            self.supervisor_prompt = supervisor_prompt
+        elif self.config.simple_prompts:
+            self.supervisor_prompt = self.SIMPLE_SUPERVISOR_PROMPT
+        else:
+            self.supervisor_prompt = self.SUPERVISOR_SYSTEM_PROMPT
+        
         self.persistence = None  # Set via set_persistence()
         
         # Graceful shutdown support
