@@ -87,8 +87,22 @@ class InsecureLocalExecutor:
     
     .. warning::
         This executor runs with HOST PRIVILEGES. For production use with
-        untrusted code, use DockerSandbox instead. Set _unsafe_acknowledged=True
-        or allow_unsafe_execution=True in BlackboardConfig to suppress warnings.
+        untrusted code, use DockerSandbox instead.
+        
+    .. note::
+        **Warning Suppression**: Since executors are typically instantiated 
+        before the Orchestrator, you must pass ``_unsafe_acknowledged=True`` 
+        directly when creating this executor. The ``allow_unsafe_execution`` 
+        config option in BlackboardConfig only applies to workers that create
+        executors internally.
+        
+        Example::
+        
+            # Direct instantiation - use _unsafe_acknowledged
+            executor = InsecureLocalExecutor(_unsafe_acknowledged=True)
+            
+            # Via BlackboardConfig - for internal worker use
+            config = BlackboardConfig(allow_unsafe_execution=True)
     
     Args:
         timeout: Default timeout in seconds
@@ -97,7 +111,7 @@ class InsecureLocalExecutor:
         _unsafe_acknowledged: Set to True to suppress security warning
         
     Example:
-        executor = InsecureLocalExecutor(timeout=10)
+        executor = InsecureLocalExecutor(timeout=10, _unsafe_acknowledged=True)
         result = await executor.execute("x = 1 + 1; print(x)")
     """
     
@@ -108,11 +122,17 @@ class InsecureLocalExecutor:
         allowed_imports: Optional[list] = None,
         _unsafe_acknowledged: bool = False
     ):
-        if not _unsafe_acknowledged:
+        import os
+        
+        # Check environment variable for unsafe execution acknowledgment
+        env_unsafe = os.getenv("BLACKBOARD_ALLOW_UNSAFE_EXECUTION", "false").lower() in ("true", "1", "yes")
+        
+        # Only warn if NEITHER the explicit flag NOR the env var is set
+        if not (_unsafe_acknowledged or env_unsafe):
             logger.warning(
                 "⚠️ InsecureLocalExecutor runs code with HOST PRIVILEGES. "
                 "Use DockerSandbox for untrusted code. "
-                "Set allow_unsafe_execution=True in BlackboardConfig to suppress this warning."
+                "Set BLACKBOARD_ALLOW_UNSAFE_EXECUTION=1 env var or _unsafe_acknowledged=True to suppress."
             )
         
         self.timeout = timeout

@@ -686,11 +686,32 @@ Rules:
             raise
 
     async def _execute_worker(self, state: Blackboard, call: WorkerCall) -> None:
-        """Execute a single worker with retry logic."""
+        """Execute a single worker with retry logic and middleware support."""
+        from .middleware import WorkerContext
+        
         worker = self.registry.get(call.worker_name)
         
         if worker is None:
             logger.warning(f"Worker '{call.worker_name}' not found")
+            return
+        
+        # Create worker context for middleware
+        worker_ctx = WorkerContext(worker=worker, call=call, state=state)
+        
+        # Run before_worker middleware hooks
+        await self.middleware.before_worker(worker_ctx)
+        
+        # Check if middleware requested skip
+        if worker_ctx.skip_worker:
+            logger.debug(f"Worker '{call.worker_name}' skipped by middleware")
+            if worker_ctx.error:
+                # Middleware set an error (e.g., circuit breaker open)
+                await self.middleware.on_error(worker_ctx)
+                state.add_feedback(Feedback(
+                    source="Middleware",
+                    critique=f"Worker '{call.worker_name}' skipped: {str(worker_ctx.error)}",
+                    passed=False
+                ))
             return
         
         # Update status based on worker type (heuristic)
@@ -734,31 +755,46 @@ Rules:
                 policy=self.retry_policy,
                 on_retry=on_retry
             )
-            self._apply_worker_output(state, output, worker.name)
+            
+            # Store output in context for middleware
+            worker_ctx.modified_output = output
+            
+            # Run after_worker middleware hooks
+            await self.middleware.after_worker(worker_ctx)
+            
+            # Use modified output if middleware changed it
+            final_output = worker_ctx.modified_output or output
+            
+            self._apply_worker_output(state, final_output, worker.name)
             
             await self._publish_event(EventType.WORKER_COMPLETED, {
                 "worker": worker.name,
-                "has_artifact": output.has_artifact(),
-                "has_feedback": output.has_feedback()
+                "has_artifact": final_output.has_artifact(),
+                "has_feedback": final_output.has_feedback()
             })
             
-            if output.has_artifact():
-                logger.debug(f"Artifact: {output.artifact.type}")
+            if final_output.has_artifact():
+                logger.debug(f"Artifact: {final_output.artifact.type}")
                 await self._publish_event(EventType.ARTIFACT_CREATED, {
-                    "id": output.artifact.id,
-                    "type": output.artifact.type,
+                    "id": final_output.artifact.id,
+                    "type": final_output.artifact.type,
                     "creator": worker.name
                 })
-            if output.has_feedback():
-                logger.debug(f"Feedback: passed={output.feedback.passed}")
+            if final_output.has_feedback():
+                logger.debug(f"Feedback: passed={final_output.feedback.passed}")
                 await self._publish_event(EventType.FEEDBACK_ADDED, {
-                    "id": output.feedback.id,
-                    "passed": output.feedback.passed,
+                    "id": final_output.feedback.id,
+                    "passed": final_output.feedback.passed,
                     "source": worker.name
                 })
                 
         except Exception as e:
             logger.error(f"Worker error: {e}")
+            worker_ctx.error = e
+            
+            # Run on_error middleware hooks
+            await self.middleware.on_error(worker_ctx)
+            
             await self._publish_event(EventType.WORKER_ERROR, {
                 "worker": worker.name,
                 "error": str(e),
@@ -1028,7 +1064,18 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
             worker_lines.append(line)
         worker_list = "\n".join(worker_lines)
         
+        # Format base system prompt
         system_prompt = self.supervisor_prompt.format(worker_list=worker_list)
+        
+        # Inject JSON schema if not using simple prompts (helps LLMs follow structure)
+        if not self.config.simple_prompts:
+            try:
+                from .schemas import get_supervisor_json_schema, PYDANTIC_AVAILABLE
+                if PYDANTIC_AVAILABLE:
+                    schema = get_supervisor_json_schema()
+                    system_prompt += f"\n\n## Required JSON Schema\nYou MUST output JSON adhering to this schema:\n{json.dumps(schema, indent=2)}"
+            except ImportError:
+                pass
         
         full_prompt = f"{system_prompt}\n\n## Current State\n{context}\n\n## Your Decision (JSON only):"
         
@@ -1117,6 +1164,17 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
             for attempt in range(2):
                 try:
                     data = json.loads(json_str)
+                    
+                    # Validate using Pydantic schemas if available
+                    try:
+                        from .schemas import validate_supervisor_response, PYDANTIC_AVAILABLE
+                        if PYDANTIC_AVAILABLE:
+                            validation_error = validate_supervisor_response(data)
+                            if validation_error:
+                                logger.warning(f"Schema validation failed: {validation_error}")
+                    except ImportError:
+                        pass  # No schema validation available
+                    
                     action = data.get("action", "fail")
                     reasoning = data.get("reasoning", "")
                     
