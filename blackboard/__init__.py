@@ -64,6 +64,9 @@ from .core import (
     run_blackboard_sync,
 )
 
+# Configuration
+from .config import BlackboardConfig
+
 # Functional worker decorators
 from .decorators import (
     worker,
@@ -103,6 +106,8 @@ __all__ = [
     "LLMUsage",
     "run_blackboard",
     "run_blackboard_sync",
+    # Configuration
+    "BlackboardConfig",
     # Version
     "__version__",
 ]

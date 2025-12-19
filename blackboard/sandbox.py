@@ -85,10 +85,16 @@ class InsecureLocalExecutor:
     ⚠️ NOT SECURE - runs code with same privileges as the host process.
     Use DockerSandbox for untrusted code.
     
+    .. warning::
+        This executor runs with HOST PRIVILEGES. For production use with
+        untrusted code, use DockerSandbox instead. Set _unsafe_acknowledged=True
+        or allow_unsafe_execution=True in BlackboardConfig to suppress warnings.
+    
     Args:
         timeout: Default timeout in seconds
         python_path: Path to Python interpreter (defaults to current)
         allowed_imports: List of allowed module imports (None = all allowed)
+        _unsafe_acknowledged: Set to True to suppress security warning
         
     Example:
         executor = InsecureLocalExecutor(timeout=10)
@@ -99,8 +105,16 @@ class InsecureLocalExecutor:
         self,
         timeout: float = 30.0,
         python_path: Optional[str] = None,
-        allowed_imports: Optional[list] = None
+        allowed_imports: Optional[list] = None,
+        _unsafe_acknowledged: bool = False
     ):
+        if not _unsafe_acknowledged:
+            logger.warning(
+                "⚠️ InsecureLocalExecutor runs code with HOST PRIVILEGES. "
+                "Use DockerSandbox for untrusted code. "
+                "Set allow_unsafe_execution=True in BlackboardConfig to suppress this warning."
+            )
+        
         self.timeout = timeout
         self.python_path = python_path or sys.executable
         self.allowed_imports = allowed_imports

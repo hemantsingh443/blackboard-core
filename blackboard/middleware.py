@@ -547,3 +547,201 @@ class ConsoleLoggingMiddleware(Middleware):
             print(f"  {self._c('green', '✓')} {worker_name} created artifact: {ctx.modified_output.artifact.type}")
         else:
             print(f"  {self._c('green', '✓')} {worker_name} completed")
+
+
+# =============================================================================
+# Production-Grade Middleware
+# =============================================================================
+
+class CircuitBreakerMiddleware(Middleware):
+    """
+    Implements circuit breaker pattern for worker execution.
+    
+    Prevents cascading failures by tracking errors and temporarily
+    blocking worker execution when failures exceed threshold.
+    
+    State is persisted in Blackboard.metadata["circuit_breaker"] to survive
+    across HTTP requests and distributed runs.
+    
+    States:
+    - closed: Normal operation, errors increment failure count
+    - open: Failing fast, worker execution skipped
+    - half-open: Testing recovery, one execution allowed
+    
+    Args:
+        failure_threshold: Failures before opening circuit (default: 5)
+        recovery_timeout: Seconds before trying half-open (default: 30)
+        worker_patterns: Optional list of worker name patterns to apply to
+        
+    Example:
+        middleware = [CircuitBreakerMiddleware(failure_threshold=3)]
+        orchestrator = Orchestrator(llm=llm, workers=workers, middleware=middleware)
+    """
+    
+    name = "CircuitBreaker"
+    
+    def __init__(
+        self,
+        failure_threshold: int = 5,
+        recovery_timeout: float = 30.0,
+        worker_patterns: Optional[List[str]] = None
+    ):
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.worker_patterns = worker_patterns
+    
+    def _get_state(self, ctx: WorkerContext) -> dict:
+        """Get or initialize circuit breaker state from Blackboard metadata."""
+        return ctx.state.metadata.setdefault("circuit_breaker", {
+            "failures": 0,
+            "state": "closed",
+            "last_failure": None,
+            "last_success": None
+        })
+    
+    def _should_apply(self, worker_name: str) -> bool:
+        """Check if circuit breaker applies to this worker."""
+        if self.worker_patterns is None:
+            return True
+        return any(pattern in worker_name for pattern in self.worker_patterns)
+    
+    async def before_worker(self, ctx: WorkerContext) -> None:
+        """Check circuit state before worker execution."""
+        import time
+        
+        if not self._should_apply(ctx.worker.name):
+            return
+        
+        cb = self._get_state(ctx)
+        
+        if cb["state"] == "open":
+            # Check if recovery timeout has passed
+            if cb["last_failure"] and time.time() - cb["last_failure"] > self.recovery_timeout:
+                cb["state"] = "half-open"
+            else:
+                # Skip worker execution
+                ctx.skip_worker = True
+                ctx.error = Exception(f"Circuit breaker OPEN for worker {ctx.worker.name}")
+                return
+    
+    async def after_worker(self, ctx: WorkerContext) -> None:
+        """Reset circuit on success."""
+        import time
+        
+        if not self._should_apply(ctx.worker.name):
+            return
+        
+        if ctx.error is None:
+            cb = self._get_state(ctx)
+            cb["failures"] = 0
+            cb["state"] = "closed"
+            cb["last_success"] = time.time()
+    
+    async def on_error(self, ctx: WorkerContext) -> bool:
+        """Track failures and open circuit if threshold exceeded."""
+        import time
+        
+        if not self._should_apply(ctx.worker.name):
+            return False
+        
+        cb = self._get_state(ctx)
+        cb["failures"] += 1
+        cb["last_failure"] = time.time()
+        
+        if cb["failures"] >= self.failure_threshold:
+            cb["state"] = "open"
+        
+        return False  # Don't suppress error, just track
+
+
+class DatasetLoggingMiddleware(Middleware):
+    """
+    Logs context→decision pairs for LLM fine-tuning datasets.
+    
+    Captures structured data in JSONL format suitable for training:
+    - prompt: The context string shown to the supervisor LLM
+    - completion: The supervisor's decision (JSON)
+    - score: 1.0 for success, 0.0 for failure
+    
+    Args:
+        filepath: Path to JSONL file (default: "finetune_dataset.jsonl")
+        max_prompt_length: Truncate prompts to this length (default: 4000)
+        include_worker_pairs: Also log worker inputs/outputs (default: False)
+        
+    Example:
+        middleware = [DatasetLoggingMiddleware("training_data.jsonl")]
+        orchestrator = Orchestrator(..., middleware=middleware)
+        
+        # After running, you'll have JSONL entries like:
+        # {"prompt": "...", "completion": "...", "score": 1.0}
+    """
+    
+    name = "DatasetLogger"
+    
+    def __init__(
+        self,
+        filepath: str = "finetune_dataset.jsonl",
+        max_prompt_length: int = 4000,
+        include_worker_pairs: bool = False
+    ):
+        self.filepath = filepath
+        self.max_prompt_length = max_prompt_length
+        self.include_worker_pairs = include_worker_pairs
+    
+    async def after_step(self, ctx: StepContext) -> None:
+        """Log supervisor decisions for fine-tuning."""
+        import json
+        
+        if ctx.decision is None:
+            return
+        
+        # Determine score based on status
+        from .state import Status
+        score = 0.0 if ctx.state.status == Status.FAILED else 1.0
+        
+        # Build decision dict
+        decision_dict = {
+            "action": ctx.decision.action,
+            "reasoning": ctx.decision.reasoning,
+            "calls": [
+                {"worker": c.worker_name, "instructions": c.instructions}
+                for c in ctx.decision.calls
+            ]
+        }
+        
+        entry = {
+            "type": "supervisor_decision",
+            "prompt": ctx.state.to_context_string()[:self.max_prompt_length],
+            "completion": json.dumps(decision_dict),
+            "score": score,
+            "step": ctx.step_number
+        }
+        
+        try:
+            with open(self.filepath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass  # Don't fail orchestration on logging errors
+    
+    async def after_worker(self, ctx: WorkerContext) -> None:
+        """Optionally log worker input/output pairs."""
+        if not self.include_worker_pairs:
+            return
+        
+        import json
+        
+        entry = {
+            "type": "worker_execution",
+            "worker": ctx.worker.name,
+            "instructions": ctx.call.instructions[:1000] if ctx.call else "",
+            "has_artifact": ctx.modified_output.has_artifact() if ctx.modified_output else False,
+            "has_feedback": ctx.modified_output.has_feedback() if ctx.modified_output else False,
+            "error": str(ctx.error) if ctx.error else None
+        }
+        
+        try:
+            with open(self.filepath, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:
+            pass
+

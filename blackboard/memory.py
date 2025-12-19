@@ -144,7 +144,8 @@ class SimpleVectorMemory(Memory):
     def __init__(
         self,
         embedder: Optional[EmbeddingModel] = None,
-        persist_path: Optional[str] = None
+        persist_path: Optional[str] = None,
+        _suppress_warning: bool = False
     ):
         """
         Initialize the memory store.
@@ -152,7 +153,20 @@ class SimpleVectorMemory(Memory):
         Args:
             embedder: Embedding model (default: TFIDFEmbedder)
             persist_path: Optional path to persist memories to disk
+            _suppress_warning: Set to True to suppress the O(N) search warning
         """
+        import warnings
+        
+        if not _suppress_warning:
+            warnings.warn(
+                "SimpleVectorMemory uses O(N) linear search. "
+                "For production with >10k entries, use ChromaMemory from "
+                "blackboard.vectordb or HybridSearchMemory. "
+                "SQLite persistence solves RAM, not search speed.",
+                UserWarning,
+                stacklevel=2
+            )
+        
         self._memories: Dict[str, MemoryEntry] = {}
         self._embedder = embedder or TFIDFEmbedder()
         self.persist_path = persist_path

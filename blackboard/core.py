@@ -214,6 +214,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         self,
         llm: LLMClient,
         workers: List[Worker],
+        config: Optional["BlackboardConfig"] = None,
         verbose: bool = False,
         on_step: Optional[Callable[[int, Blackboard, SupervisorDecision], None]] = None,
         event_bus: Optional[EventBus] = None,
@@ -235,6 +236,7 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         Args:
             llm: An LLM client with a generate() method (sync or async)
             workers: List of workers to manage
+            config: BlackboardConfig for centralized configuration (overrides loose kwargs)
             verbose: If True, enable INFO level logging
             on_step: Optional callback called after each step
             event_bus: Event bus for observability (creates new if not provided)
@@ -254,44 +256,74 @@ Each worker reads state at call time - workers will NOT see other workers' resul
         if not workers:
             raise ValueError("At least one worker must be provided")
         
+        # Import config here to avoid circular import
+        from .config import BlackboardConfig
+        
+        # Use config if provided, otherwise use individual kwargs
+        if config is not None:
+            self.config = config
+        else:
+            # Build config from kwargs for backward compatibility
+            self.config = BlackboardConfig(
+                max_steps=20,  # Default, overridden in run()
+                allow_unsafe_execution=False,
+                simple_prompts=False,
+                use_tool_calling=use_tool_calling,
+                allow_json_fallback=allow_json_fallback,
+                strict_tools=strict_tools,
+                enable_parallel=enable_parallel,
+                auto_summarize=auto_summarize,
+                auto_save_path=auto_save_path,
+                verbose=verbose,
+                summarize_thresholds=summarize_thresholds or {
+                    "artifacts": 10,
+                    "feedback": 20,
+                    "steps": 50
+                }
+            )
+        
         self.llm = llm
         self.registry = WorkerRegistry()
         for worker in workers:
             self.registry.register(worker)
-        self.verbose = verbose
+        self.verbose = self.config.verbose if config else verbose
         self.on_step = on_step
         self.event_bus = event_bus or EventBus()
         self.retry_policy = retry_policy or DEFAULT_RETRY_POLICY
-        self.auto_save_path = auto_save_path
-        self.enable_parallel = enable_parallel
+        self.auto_save_path = self.config.auto_save_path if config else auto_save_path
+        self.enable_parallel = self.config.enable_parallel if config else enable_parallel
         self.usage_tracker = usage_tracker
-        self.use_tool_calling = use_tool_calling
-        self.allow_json_fallback = allow_json_fallback
-        self.strict_tools = strict_tools
-        self.auto_summarize = auto_summarize
-        self.summarize_thresholds = summarize_thresholds or {
+        self.use_tool_calling = self.config.use_tool_calling if config else use_tool_calling
+        self.allow_json_fallback = self.config.allow_json_fallback if config else allow_json_fallback
+        self.strict_tools = self.config.strict_tools if config else strict_tools
+        self.auto_summarize = self.config.auto_summarize if config else auto_summarize
+        self.summarize_thresholds = self.config.summarize_thresholds if config else (summarize_thresholds or {
             "artifacts": 10,
             "feedback": 20,
             "steps": 50
-        }
+        })
         self.supervisor_prompt = supervisor_prompt or self.SUPERVISOR_SYSTEM_PROMPT
         self.persistence = None  # Set via set_persistence()
+        
+        # Graceful shutdown support
+        self._shutdown_requested = False
+        self._setup_signal_handlers()
         
         # Check if LLM supports tool calling
         self._supports_tool_calling = isinstance(llm, ToolCallingLLMClient)
         
         # Cache tool definitions if tool calling is available
         self._tool_definitions: List[ToolDefinition] = []
-        if self._supports_tool_calling and use_tool_calling:
+        if self._supports_tool_calling and self.use_tool_calling:
             try:
                 self._tool_definitions = self._build_tool_definitions(workers)
                 self._tool_definitions.extend([DONE_TOOL, FAIL_TOOL])
                 
                 # Validate tool definitions if strict mode
-                if strict_tools:
+                if self.strict_tools:
                     self._validate_tool_definitions()
             except Exception as e:
-                if strict_tools:
+                if self.strict_tools:
                     raise ValueError(f"Tool definition error (strict_tools=True): {e}") from e
                 else:
                     logger.warning(f"Tool definition error, tool calling disabled: {e}")
@@ -304,11 +336,30 @@ Each worker reads state at call time - workers will NOT see other workers' resul
                 self.middleware.add(mw)
         
         # Configure logging based on verbose flag
-        if verbose and not logger.handlers:
+        if self.verbose and not logger.handlers:
             handler = logging.StreamHandler()
             handler.setFormatter(logging.Formatter('[%(name)s] %(message)s'))
             logger.addHandler(handler)
             logger.setLevel(logging.DEBUG)
+    
+    def _setup_signal_handlers(self) -> None:
+        """Set up signal handlers for graceful shutdown."""
+        import signal
+        import sys
+        
+        # Only set up signal handlers on main thread and non-Windows for SIGTERM
+        try:
+            if hasattr(signal, 'SIGTERM'):
+                signal.signal(signal.SIGTERM, self._handle_shutdown_signal)
+            signal.signal(signal.SIGINT, self._handle_shutdown_signal)
+        except ValueError:
+            # Signal only works in main thread
+            pass
+    
+    def _handle_shutdown_signal(self, signum, frame) -> None:
+        """Handle shutdown signals gracefully."""
+        logger.warning(f"Shutdown signal received (signal {signum}). Finishing current step...")
+        self._shutdown_requested = True
 
     def _build_tool_definitions(self, workers: List[Worker]) -> List[ToolDefinition]:
         """
@@ -464,6 +515,20 @@ Each worker reads state at call time - workers will NOT see other workers' resul
             if self.auto_save_path:
                 state.save_to_json(self.auto_save_path)
                 await self._publish_event(EventType.STATE_SAVED, {"path": self.auto_save_path})
+            
+            # Check for graceful shutdown request
+            if self._shutdown_requested:
+                logger.info("Graceful shutdown: saving state and exiting...")
+                if self.auto_save_path:
+                    state.save_to_json(self.auto_save_path)
+                state.update_status(Status.PAUSED)
+                state.metadata["shutdown_reason"] = "graceful_shutdown"
+                await self._publish_event(EventType.ORCHESTRATOR_COMPLETED, {
+                    "status": "paused",
+                    "reason": "graceful_shutdown",
+                    "step_count": state.step_count
+                })
+                break
         else:
             # Max steps reached without completion
             if state.status not in (Status.DONE, Status.FAILED):
