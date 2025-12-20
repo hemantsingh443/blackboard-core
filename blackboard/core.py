@@ -541,6 +541,15 @@ Rules:
             if step_ctx.skip_step:
                 break
             
+            # Check if a worker requested pause (e.g., HumanProxyWorker)
+            if state.status == Status.PAUSED:
+                logger.info("Execution paused (awaiting input)")
+                await self._publish_event(EventType.ORCHESTRATOR_PAUSED, {
+                    "step": state.step_count,
+                    "pending_input": state.pending_input
+                })
+                break
+            
             await self._publish_event(EventType.STEP_COMPLETED, {
                 "step": state.step_count,
                 "action": decision.action,

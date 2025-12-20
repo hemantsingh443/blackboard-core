@@ -16,11 +16,12 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 10. [Model Context Protocol](#model-context-protocol)
 11. [OpenTelemetry](#opentelemetry)
 12. [Session Replay](#session-replay)
-13. [Terminal UI (v1.3.0)](#terminal-ui)
-14. [Production Fixes (v1.3.0)](#production-fixes)
-15. [Events & Observability](#events--observability)
-16. [Error Handling](#error-handling)
-17. [Best Practices](#best-practices)
+13. [Terminal UI](#terminal-ui)
+14. [Standard Library Workers](#standard-library-workers)
+15. [Blackboard Serve (API Deployment)](#blackboard-serve-api-deployment)
+16. [Events & Observability](#events--observability)
+17. [Error Handling](#error-handling)
+18. [Best Practices](#best-practices)
 
 ---
 
@@ -35,6 +36,9 @@ Optional dependencies:
 pip install blackboard-core[redis]   # RedisPersistence
 pip install blackboard-core[chroma]  # ChromaMemory (vector DB)
 pip install blackboard-core[hybrid]  # HybridSearchMemory (BM25)
+pip install blackboard-core[serve]   # FastAPI API server
+pip install blackboard-core[stdlib]  # Standard library workers
+pip install blackboard-core[browser] # BrowserWorker (Playwright)
 pip install blackboard-core[all]     # All optional features
 
 # Or install embedders directly:
@@ -788,6 +792,160 @@ tracker = UsageTracker(
     max_records=10000,  # Auto-eviction after 10k records
     on_flush=lambda records: save_to_db(records)  # Callback before eviction
 )
+```
+
+---
+
+## Standard Library Workers
+
+Pre-built workers for common tasks. Install with `pip install blackboard-core[stdlib]`.
+
+### WebSearchWorker
+
+Search the web using Tavily or Serper APIs:
+
+```python
+from blackboard.stdlib import WebSearchWorker
+
+# Uses TAVILY_API_KEY or SERPER_API_KEY from environment
+search = WebSearchWorker()
+
+# Or specify explicitly
+search = WebSearchWorker(provider="tavily", api_key="...")
+
+orchestrator = Orchestrator(llm=llm, workers=[search])
+```
+
+### BrowserWorker
+
+Web scraping with Playwright. Install with `pip install blackboard-core[browser]`:
+
+```python
+from blackboard.stdlib import BrowserWorker
+
+browser = BrowserWorker(headless=True, browser_type="chromium")
+
+# Extracts page content, can take screenshots, extract links
+orchestrator = Orchestrator(llm=llm, workers=[browser])
+```
+
+### CodeInterpreterWorker
+
+Safe code execution using Docker sandbox:
+
+```python
+from blackboard.stdlib import CodeInterpreterWorker
+
+# Uses Docker for isolation (falls back to local with warning)
+interpreter = CodeInterpreterWorker(
+    docker_image="python:3.11-slim",
+    memory_limit="512m",
+    network_enabled=False
+)
+
+orchestrator = Orchestrator(llm=llm, workers=[interpreter])
+```
+
+### HumanProxyWorker
+
+Pause execution and wait for human input:
+
+```python
+from blackboard.stdlib import HumanProxyWorker
+
+# API Mode: Sets status to PAUSED, stores question in pending_input
+human = HumanProxyWorker()
+
+# Resume with: state.pending_input["answer"] = "user response"
+# Then: await orchestrator.run(state=state)
+
+# Callback Mode: Get input immediately via callback
+async def get_input(question, context, options):
+    return input(f"{question}: ")
+
+human = HumanProxyWorker(input_callback=get_input)
+```
+
+For CLI usage, use `CLIHumanProxyWorker`:
+
+```python
+from blackboard.stdlib.workers.human import CLIHumanProxyWorker
+
+human = CLIHumanProxyWorker()  # Prompts via stdin/stdout
+```
+
+---
+
+## Blackboard Serve (API Deployment)
+
+Deploy your orchestrator as a REST API with one command. Install with `pip install blackboard-core[serve]`.
+
+### CLI Usage
+
+```bash
+# Start API server
+python -m pip install -e .[serve]  # Install serve dependencies
+python -m blackboard.cli serve my_app:create_orchestrator --port 8000
+```
+
+Where `my_app:create_orchestrator` is a module path to a function that returns an Orchestrator:
+
+```python
+# my_app.py
+from blackboard import Orchestrator
+from blackboard.llm import LiteLLMClient
+
+def create_orchestrator():
+    return Orchestrator(
+        llm=LiteLLMClient(model="gpt-4o"),
+        workers=[...]
+    )
+```
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/runs` | POST | Start a new run |
+| `/runs` | GET | List all runs |
+| `/runs/{id}` | GET | Get run status |
+| `/runs/{id}/full` | GET | Get full state with artifacts |
+| `/runs/{id}/resume` | POST | Resume paused run |
+| `/runs/{id}/stream` | GET | SSE event stream |
+| `/runs/{id}/events` | GET | Historical events |
+| `/health` | GET | Health check |
+
+### Programmatic Usage
+
+```python
+from blackboard.serve import create_app, BlackboardAPI
+
+# Option 1: Create FastAPI app directly
+app = create_app("my_app:create_orchestrator")
+
+# Option 2: Use convenience wrapper
+api = BlackboardAPI("my_app:create_orchestrator")
+api.run(port=8000)
+```
+
+### Example API Calls
+
+```bash
+# Start a run
+curl -X POST http://localhost:8000/runs \
+  -H "Content-Type: application/json" \
+  -d '{"goal": "Write a haiku about AI"}'
+
+# Check status
+curl http://localhost:8000/runs/{run_id}
+
+# Resume paused run
+curl -X POST http://localhost:8000/runs/{run_id}/resume \
+  -H "Content-Type: application/json" \
+  -d '{"answer": "Yes, proceed"}'
+
+# Stream events (SSE)
+curl http://localhost:8000/runs/{run_id}/stream
 ```
 
 ---
