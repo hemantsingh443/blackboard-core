@@ -34,15 +34,39 @@ class BrowserWorker(Worker):
         pip install playwright
         playwright install chromium
     
+    .. warning::
+        Resource Management: By default, BrowserWorker creates a new browser
+        instance on first use and reuses it for subsequent calls. In long-running
+        processes (like `blackboard serve`), you should:
+        
+        1. Create ONE BrowserWorker instance and reuse it across all runs
+        2. Use `async with browser_worker:` context manager for automatic cleanup
+        3. Or call `await browser_worker._cleanup()` when done
+        
+        The browser instance is NOT automatically closed between runs to avoid
+        the overhead of repeatedly launching Chromium.
+    
     Args:
         name: Worker name (default: "Browser")
         description: Worker description
         headless: Run browser in headless mode (default: True)
         browser_type: Browser to use ("chromium", "firefox", "webkit")
+        close_browser_after_run: If True, close browser after each run (slower but safer)
         
     Example:
+        # Option 1: Persistent browser (recommended for API servers)
         browser = BrowserWorker()
         orchestrator = Orchestrator(llm=my_llm, workers=[browser])
+        # Browser stays open across multiple runs
+        
+        # Option 2: Auto-cleanup with context manager
+        async with BrowserWorker() as browser:
+            orchestrator = Orchestrator(llm=my_llm, workers=[browser])
+            await orchestrator.run(goal="...")
+        # Browser is automatically closed
+        
+        # Option 3: Close after each run (slower, for memory-constrained envs)
+        browser = BrowserWorker(close_browser_after_run=True)
     """
     
     name = "Browser"
@@ -55,14 +79,17 @@ class BrowserWorker(Worker):
         name: str = "Browser",
         description: str = "Navigates to web pages and extracts content",
         headless: bool = True,
-        browser_type: str = "chromium"
+        browser_type: str = "chromium",
+        close_browser_after_run: bool = False
     ):
         self.name = name
         self.description = description
         self.headless = headless
         self.browser_type = browser_type
+        self.close_browser_after_run = close_browser_after_run
         self._playwright = None
         self._browser = None
+        self._browser_launch_count = 0
     
     async def _ensure_browser(self):
         """Ensure browser is started."""
@@ -87,15 +114,25 @@ class BrowserWorker(Worker):
             self._browser = await self._playwright.webkit.launch(headless=self.headless)
         else:
             raise ValueError(f"Unknown browser type: {self.browser_type}")
+        
+        self._browser_launch_count += 1
+        logger.info(f"[{self.name}] Launched {self.browser_type} (launch #{self._browser_launch_count})")
     
     async def _cleanup(self):
         """Clean up browser resources."""
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception as e:
+                logger.warning(f"[{self.name}] Error closing browser: {e}")
             self._browser = None
         if self._playwright:
-            await self._playwright.stop()
+            try:
+                await self._playwright.stop()
+            except Exception as e:
+                logger.warning(f"[{self.name}] Error stopping playwright: {e}")
             self._playwright = None
+        logger.debug(f"[{self.name}] Browser resources cleaned up")
     
     async def run(
         self,
@@ -188,6 +225,10 @@ class BrowserWorker(Worker):
                 
             finally:
                 await page.close()
+                
+                # Optionally close browser after each run (for memory-constrained envs)
+                if self.close_browser_after_run:
+                    await self._cleanup()
                 
         except Exception as e:
             logger.error(f"[{self.name}] Browser error: {e}")

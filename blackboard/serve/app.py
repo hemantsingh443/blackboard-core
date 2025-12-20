@@ -294,6 +294,11 @@ def create_app(
                             "data": json.dumps(session.to_dict())
                         }
                         break
+                
+                except asyncio.CancelledError:
+                    # Client disconnected
+                    logger.info(f"Client disconnected from stream {run_id}")
+                    break
                         
                 except asyncio.TimeoutError:
                     # Send keepalive
