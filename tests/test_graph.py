@@ -8,12 +8,24 @@ import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from blackboard.memory import MemoryEntry, SearchResult
-from blackboard.graph import (
-    Triple, 
-    extract_triples_simple, 
-    NetworkXStore,
-    GraphMemory
+from blackboard.graph import Triple, extract_triples_simple
+
+# Check if networkx is available
+try:
+    import networkx as nx
+    HAS_NETWORKX = True
+except ImportError:
+    HAS_NETWORKX = False
+
+# Skip all tests in this module if networkx is not installed
+pytestmark = pytest.mark.skipif(
+    not HAS_NETWORKX, 
+    reason="networkx not installed (optional dependency)"
 )
+
+# Import store/memory only if networkx is available (to avoid import errors)
+if HAS_NETWORKX:
+    from blackboard.graph import NetworkXStore, GraphMemory
 
 
 # =============================================================================
