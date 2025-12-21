@@ -41,6 +41,9 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 - **Tool Calling** - Native support for OpenAI-style function calling
 - **Memory System** - Vector memory with pluggable embeddings
 - **Live TUI** - Real-time terminal visualization with markdown support
+- **Blueprints** - Structured workflows with step-by-step control
+- **Graph Memory** - GraphRAG with hybrid vector+graph search
+- **Reference UI** - Streamlit dashboard for API interaction
 
 ## Installation
 
@@ -51,6 +54,10 @@ pip install blackboard-core
 pip install blackboard-core[mcp]        # Model Context Protocol
 pip install blackboard-core[telemetry]  # OpenTelemetry
 pip install blackboard-core[chroma]     # ChromaDB for memory
+pip install blackboard-core[graph]      # Graph Memory (NetworkX)
+pip install blackboard-core[ui]         # Streamlit Reference UI
+pip install blackboard-core[serve]      # FastAPI server
+pip install blackboard-core[all]        # Everything
 ```
 
 ## Quick Start

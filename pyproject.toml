@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackboard-core"
-version = "1.3.2"
+version = "1.4.0"
 description = "A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -63,6 +63,7 @@ all = [
     "rank-bm25>=0.2.2",
     "rich>=13.0.0",
     "mcp[cli]>=1.0.0",
+    "networkx>=3.0.0",
     "opentelemetry-api>=1.20.0",
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp>=1.20.0",
@@ -76,6 +77,13 @@ browser = [
     "playwright>=1.40.0",
 ]
 stdlib = [
+    "httpx>=0.25.0",
+]
+graph = [
+    "networkx>=3.0.0",
+]
+ui = [
+    "streamlit>=1.28.0",
     "httpx>=0.25.0",
 ]
 

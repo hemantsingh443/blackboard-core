@@ -77,7 +77,7 @@ from .decorators import (
 # VERSION
 # =============================================================================
 
-__version__ = "1.3.2"
+__version__ = "1.4.0"
 
 # =============================================================================
 # CORE PUBLIC API (__all__)
@@ -141,3 +141,13 @@ __all__ = [
 #
 # Persistence:
 #   from blackboard.persistence import RedisPersistence, JSONFilePersistence
+#
+# Blueprints (Structured Workflows) - NEW in Phase 2:
+#   from blackboard.flow import Step, Blueprint, simple_blueprint
+#
+# Graph Memory (GraphRAG) - NEW in Phase 2:
+#   from blackboard.graph import GraphMemory, NetworkXStore, Triple
+#
+# Reference UI - NEW in Phase 2:
+#   CLI: blackboard ui --api-url http://localhost:8000
+

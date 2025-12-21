@@ -383,6 +383,8 @@ Rules:
         import signal
         import sys
         
+        self._shutdown_count = 0  # Track number of shutdown signals
+        
         # Only set up signal handlers on main thread and non-Windows for SIGTERM
         try:
             if hasattr(signal, 'SIGTERM'):
@@ -394,8 +396,16 @@ Rules:
     
     def _handle_shutdown_signal(self, signum, frame) -> None:
         """Handle shutdown signals gracefully."""
-        logger.warning(f"Shutdown signal received (signal {signum}). Finishing current step...")
+        import sys
+        
+        self._shutdown_count = getattr(self, '_shutdown_count', 0) + 1
         self._shutdown_requested = True
+        
+        if self._shutdown_count == 1:
+            logger.warning(f"Shutdown signal received. Press Ctrl+C again to force quit.")
+        else:
+            logger.warning(f"Force quit requested. Exiting immediately.")
+            sys.exit(1)
 
     def _build_tool_definitions(self, workers: List[Worker]) -> List[ToolDefinition]:
         """
@@ -428,7 +438,8 @@ Rules:
         self,
         goal: Optional[str] = None,
         state: Optional[Blackboard] = None,
-        max_steps: int = 20
+        max_steps: int = 20,
+        blueprint: Optional["Blueprint"] = None
     ) -> Blackboard:
         """
         Execute the main orchestration loop (async).
@@ -437,6 +448,7 @@ Rules:
             goal: The objective to accomplish (required if state is None)
             state: Existing state to resume from (optional)
             max_steps: Maximum number of steps before stopping
+            blueprint: Optional workflow blueprint to constrain execution
             
         Returns:
             The final blackboard state
@@ -495,7 +507,7 @@ Rules:
             context = state.to_context_string()
             
             # 2. REASON: Ask LLM for next action
-            decision = await self._get_supervisor_decision(context, state)
+            decision = await self._get_supervisor_decision(context, state, blueprint)
             step_ctx.decision = decision
             
             logger.debug(f"Decision: {decision.action} -> {[c.worker_name for c in decision.calls]}")
@@ -530,6 +542,10 @@ Rules:
             if decision.action == "call" and decision.calls:
                 # Single worker call
                 await self._execute_worker(state, decision.calls[0])
+                # Advance blueprint step if needed
+                if blueprint:
+                    blueprint.increment_step_iteration(state)
+                    blueprint.advance_step(state)
             elif decision.action == "call_independent" and decision.calls:
                 # Independent parallel worker calls (stale read warning: each sees state at T0)
                 await self._execute_workers_parallel(state, decision.calls)
@@ -992,23 +1008,36 @@ Provide a 1-2 paragraph summary:'''
             logger.warning(f"Auto-summarization failed: {e}")
 
 
-    async def _get_supervisor_decision(self, context: str, state: Blackboard) -> SupervisorDecision:
+    async def _get_supervisor_decision(
+        self, 
+        context: str, 
+        state: Blackboard,
+        blueprint: Optional["Blueprint"] = None
+    ) -> SupervisorDecision:
         """Ask the LLM supervisor what to do next."""
         
         # Use tool calling if available
         if self._supports_tool_calling and self.use_tool_calling and self._tool_definitions:
-            return await self._get_decision_via_tools(context, state)
+            return await self._get_decision_via_tools(context, state, blueprint)
         
         # Fallback to JSON-based approach
-        return await self._get_decision_via_json(context, state)
+        return await self._get_decision_via_json(context, state, blueprint)
     
-    async def _get_decision_via_tools(self, context: str, state: Blackboard) -> SupervisorDecision:
+    async def _get_decision_via_tools(
+        self, 
+        context: str, 
+        state: Blackboard,
+        blueprint: Optional["Blueprint"] = None
+    ) -> SupervisorDecision:
         """Get decision using native tool calling."""
+        # Build prompt with optional blueprint context
+        blueprint_context = blueprint.get_prompt_context(state) if blueprint else ""
+        
         simple_prompt = f"""You are a supervisor coordinating workers to achieve the goal.
 
 ## Current State
 {context}
-
+{blueprint_context}
 Choose the best action: call a worker tool, mark_done if complete, or mark_failed if impossible."""
         
         try:
@@ -1061,10 +1090,21 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
                     f"Tool calling failed and allow_json_fallback=False: {e}"
                 ) from e
     
-    async def _get_decision_via_json(self, context: str, state: Blackboard) -> SupervisorDecision:
+    async def _get_decision_via_json(
+        self, 
+        context: str, 
+        state: Blackboard,
+        blueprint: Optional["Blueprint"] = None
+    ) -> SupervisorDecision:
         """Get decision using JSON-based prompting."""
         # Build the worker list with schemas
         worker_info = self.registry.list_workers_with_schemas()
+        
+        # Filter workers if blueprint is active
+        if blueprint:
+            allowed = blueprint.filter_workers(list(worker_info.keys()), state)
+            worker_info = {k: v for k, v in worker_info.items() if k in allowed}
+        
         worker_lines = []
         for name, info in worker_info.items():
             line = f"- **{name}**: {info['description']}"
@@ -1075,6 +1115,10 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         
         # Format base system prompt
         system_prompt = self.supervisor_prompt.format(worker_list=worker_list)
+        
+        # Inject blueprint context if active
+        if blueprint:
+            system_prompt += blueprint.get_prompt_context(state)
         
         # Inject JSON schema if not using simple prompts (helps LLMs follow structure)
         if not self.config.simple_prompts:

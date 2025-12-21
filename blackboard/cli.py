@@ -71,6 +71,57 @@ def cmd_version(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Launch the Streamlit UI."""
+    import subprocess
+    import os
+    from pathlib import Path
+    
+    # Find the UI app module
+    ui_app_path = Path(__file__).parent / "ui" / "app.py"
+    
+    if not ui_app_path.exists():
+        print(
+            f"Error: UI app not found at {ui_app_path}",
+            file=sys.stderr
+        )
+        return 1
+    
+    # Check for streamlit
+    try:
+        import streamlit
+    except ImportError:
+        print(
+            "Error: Streamlit not installed. Install with: pip install streamlit",
+            file=sys.stderr
+        )
+        return 1
+    
+    print(f"Launching Blackboard UI...")
+    print(f"  API URL: {args.api_url}")
+    print(f"  Port: {args.port}")
+    print()
+    
+    # Run streamlit
+    cmd = [
+        sys.executable, "-m", "streamlit", "run",
+        str(ui_app_path),
+        "--server.port", str(args.port),
+        "--server.headless", "true" if args.headless else "false",
+        "--", "--api-url", args.api_url
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True)
+        return 0
+    except subprocess.CalledProcessError as e:
+        print(f"Error running Streamlit: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nUI stopped.")
+        return 0
+
+
 def main() -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -131,6 +182,29 @@ def main() -> int:
     # version command
     version_parser = subparsers.add_parser("version", help="Show version")
     version_parser.set_defaults(func=cmd_version)
+    
+    # ui command
+    ui_parser = subparsers.add_parser(
+        "ui",
+        help="Launch the Streamlit UI dashboard"
+    )
+    ui_parser.add_argument(
+        "--api-url",
+        default="http://localhost:8000",
+        help="URL of the Blackboard API server (default: http://localhost:8000)"
+    )
+    ui_parser.add_argument(
+        "--port", "-p",
+        type=int,
+        default=8501,
+        help="Port for Streamlit UI (default: 8501)"
+    )
+    ui_parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run in headless mode (no browser auto-open)"
+    )
+    ui_parser.set_defaults(func=cmd_ui)
     
     args = parser.parse_args()
     
