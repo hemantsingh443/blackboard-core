@@ -44,11 +44,13 @@ def cmd_serve(args: argparse.Namespace) -> int:
     # Create the FastAPI app with the orchestrator factory
     app = create_app(
         orchestrator_path=args.orchestrator,
-        title=args.title or f"Blackboard API ({module_path})"
+        title=args.title or f"Blackboard API ({module_path})",
+        sessions_dir=args.sessions_dir
     )
     
     print(f"Starting Blackboard API server on http://{args.host}:{args.port}")
     print(f"  Orchestrator: {args.orchestrator}")
+    print(f"  Sessions: {args.sessions_dir}")
     print(f"  Docs: http://{args.host}:{args.port}/docs")
     print()
     
@@ -93,7 +95,7 @@ def main() -> int:
         help="Orchestrator factory path in 'module:attribute' format (e.g., 'my_app:create_orchestrator')"
     )
     serve_parser.add_argument(
-        "--host", "-h",
+        "--host",
         default="127.0.0.1",
         help="Host to bind to (default: 127.0.0.1)"
     )
@@ -118,6 +120,11 @@ def main() -> int:
         default="info",
         choices=["debug", "info", "warning", "error"],
         help="Log level (default: info)"
+    )
+    serve_parser.add_argument(
+        "--sessions-dir",
+        default="./api_sessions",
+        help="Directory to store session state (default: ./api_sessions)"
     )
     serve_parser.set_defaults(func=cmd_serve)
     

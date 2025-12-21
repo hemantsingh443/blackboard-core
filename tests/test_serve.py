@@ -170,7 +170,6 @@ class TestBlackboardAPI:
         
         from fastapi.testclient import TestClient
         from blackboard.serve.app import create_app
-        from blackboard.serve.manager import SessionManager
         
         # Create app with test module path
         with patch("blackboard.serve.app.importlib.import_module") as mock_import:
@@ -180,13 +179,8 @@ class TestBlackboardAPI:
             
             app = create_app("test_module:create_orchestrator")
             
-            # Override the manager startup
-            with patch.object(SessionManager, "start", new_callable=AsyncMock):
-                client = TestClient(app)
-                
-                # Manually set up manager for tests
-                from blackboard.serve import manager as manager_module
-                
+            # Use TestClient as context manager to trigger lifespan
+            with TestClient(app, raise_server_exceptions=False) as client:
                 yield client
     
     def test_health_check(self, test_client):

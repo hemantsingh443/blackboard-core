@@ -8,7 +8,8 @@ import asyncio
 import importlib
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional 
+import os
 
 from pydantic import BaseModel, Field
 
@@ -69,7 +70,8 @@ def create_app(
     title: str = "Blackboard API",
     description: str = "Multi-agent orchestration API",
     version: str = "1.0.0",
-    max_sessions: int = 100
+    max_sessions: int = 100,
+    sessions_dir: Optional[str] = None
 ) -> "FastAPI":
     """
     Create a FastAPI application for the Blackboard API.
@@ -80,6 +82,7 @@ def create_app(
         description: API description
         version: API version
         max_sessions: Maximum concurrent sessions
+        sessions_dir: Directory for session persistence (autodetected if None)
         
     Returns:
         Configured FastAPI application
@@ -111,6 +114,9 @@ def create_app(
     # Session manager (created on startup)
     manager: Optional[SessionManager] = None
     
+    # Determine default sessions dir if not provided
+    final_sessions_dir = sessions_dir or os.getenv("BLACKBOARD_SESSIONS_DIR")
+    
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Application lifespan handler."""
@@ -119,9 +125,14 @@ def create_app(
         # Startup
         logger.info(f"Loading orchestrator from {orchestrator_path}")
         factory = load_orchestrator_factory()
-        manager = SessionManager(factory, max_sessions=max_sessions)
+        
+        manager = SessionManager(
+            factory, 
+            max_sessions=max_sessions,
+            sessions_dir=final_sessions_dir
+        )
         await manager.start()
-        logger.info("Blackboard API started")
+        logger.info(f"Blackboard API started (sessions: {final_sessions_dir or 'in-memory'})")
         
         yield
         
@@ -328,11 +339,13 @@ class BlackboardAPI:
         self,
         orchestrator_path: str,
         title: str = "Blackboard API",
-        max_sessions: int = 100
+        max_sessions: int = 100,
+        sessions_dir: Optional[str] = None
     ):
         self.orchestrator_path = orchestrator_path
         self.title = title
         self.max_sessions = max_sessions
+        self.sessions_dir = sessions_dir
         self._app = None
     
     @property
@@ -342,7 +355,8 @@ class BlackboardAPI:
             self._app = create_app(
                 orchestrator_path=self.orchestrator_path,
                 title=self.title,
-                max_sessions=self.max_sessions
+                max_sessions=self.max_sessions,
+                sessions_dir=self.sessions_dir
             )
         return self._app
     
