@@ -23,6 +23,13 @@ from .tools import (
     worker_to_tool_definition, workers_to_tool_definitions,
     DONE_TOOL, FAIL_TOOL
 )
+from .reasoning import (
+    ReasoningStrategy,
+    OneShotStrategy,
+    ChainOfThoughtStrategy,
+    get_strategy,
+    DEFAULT_STRATEGY
+)
 
 
 # Configure module logger
@@ -157,86 +164,6 @@ class Orchestrator:
         state = Blackboard.load_from_json("session.json")
         result = await orchestrator.run(state=state)
     """
-    
-    SUPERVISOR_SYSTEM_PROMPT = '''You are a Supervisor managing a team of AI workers to accomplish a goal.
-
-## Your Role
-- You NEVER do the work yourself
-- You ONLY decide which worker(s) to call next based on the current state
-- You route tasks and provide specific instructions to workers
-
-## Available Workers
-{worker_list}
-
-## Response Format
-You MUST respond with valid JSON in one of these formats:
-
-### Single Worker Call
-```json
-{{
-    "reasoning": "Brief explanation of why you're making this decision",
-    "action": "call",
-    "worker": "WorkerName",
-    "instructions": "Specific instructions for the worker"
-}}
-```
-
-### Independent Worker Calls (parallel, NO dependencies)
-IMPORTANT: Only use this when tasks do NOT depend on each other's outputs.
-Each worker reads state at call time - workers will NOT see other workers' results from this batch.
-```json
-{{
-    "reasoning": "These tasks are fully independent - no worker needs another's output",
-    "action": "call_independent",
-    "calls": [
-        {{"worker": "Worker1", "instructions": "Task 1"}},
-        {{"worker": "Worker2", "instructions": "Task 2"}}
-    ]
-}}
-```
-
-### Terminal Actions
-```json
-{{"action": "done", "reasoning": "Goal achieved"}}
-{{"action": "fail", "reasoning": "Cannot complete"}}
-```
-
-## Rules
-1. If there's no artifact yet, call a Generator/Writer worker
-2. If there's an artifact but no feedback, call a Critic/Reviewer worker
-3. If feedback says "passed: false", call the Generator again with the critique
-4. If feedback says "passed: true", mark as "done"
-5. Use "call_independent" ONLY for truly independent tasks (e.g., researching separate topics)
-6. Don't call the same worker twice in a row without new information
-'''
-
-    # Simplified prompt for weaker models (used when simple_prompts=True)
-    SIMPLE_SUPERVISOR_PROMPT = '''You are a Supervisor managing AI workers. Your job is to decide which worker to call next.
-
-## Available Workers
-{worker_list}
-
-## Your Response
-Reply with a single JSON object. Pick ONE format:
-
-CALL A WORKER:
-{{"action": "call", "worker": "WorkerName", "instructions": "what to do"}}
-
-CALL MULTIPLE (only if independent):
-{{"action": "call_independent", "calls": [{{"worker": "A"}}, {{"worker": "B"}}]}}
-
-DONE:
-{{"action": "done", "reasoning": "why complete"}}
-
-FAILED:
-{{"action": "fail", "reasoning": "why failed"}}
-
-Rules:
-- Call Generator first if no artifact exists
-- Call Critic if artifact exists but no feedback
-- If feedback says passed=true, reply done
-- If feedback says passed=false, call Generator with the feedback
-'''
 
     def __init__(
         self,
@@ -331,13 +258,15 @@ Rules:
             "steps": 50
         })
         
-        # Select supervisor prompt based on simple_prompts setting
-        if supervisor_prompt:
-            self.supervisor_prompt = supervisor_prompt
-        elif self.config.simple_prompts:
-            self.supervisor_prompt = self.SIMPLE_SUPERVISOR_PROMPT
+        # Select reasoning strategy
+        # Strategy handles prompt construction and response parsing
+        if hasattr(self.config, 'reasoning_strategy') and self.config.reasoning_strategy == "cot":
+            self.strategy: ReasoningStrategy = ChainOfThoughtStrategy()
         else:
-            self.supervisor_prompt = self.SUPERVISOR_SYSTEM_PROMPT
+            self.strategy = DEFAULT_STRATEGY
+        
+        # Keep supervisor_prompt for backward compat (custom prompts)
+        self._custom_supervisor_prompt = supervisor_prompt
         
         self.persistence = None  # Set via set_persistence()
         
@@ -1075,9 +1004,22 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
                     action = "call_independent" if len(calls) > 1 else "call"
                     return SupervisorDecision(action=action, calls=calls, reasoning="Via tool calling")
             
-            # String response - fall back to JSON parsing
+            # String response - use strategy to parse
             if isinstance(response, str):
-                return self._parse_llm_response(response)
+                decision = self.strategy.parse_response(response)
+                # Convert Strategy Decision -> SupervisorDecision
+                calls = []
+                for call in decision.calls:
+                    calls.append(WorkerCall(
+                        worker_name=call["worker_name"],
+                        instructions=call.get("instructions", ""),
+                        inputs=call.get("inputs", {})
+                    ))
+                return SupervisorDecision(
+                    action=decision.action,
+                    calls=calls,
+                    reasoning=decision.reasoning
+                )
             
             return SupervisorDecision(action="fail", reasoning="Unexpected response format")
             
@@ -1096,8 +1038,8 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         state: Blackboard,
         blueprint: Optional["Blueprint"] = None
     ) -> SupervisorDecision:
-        """Get decision using JSON-based prompting."""
-        # Build the worker list with schemas
+        """Get decision using the configured reasoning strategy."""
+        # Build worker list for the strategy
         worker_info = self.registry.list_workers_with_schemas()
         
         # Filter workers if blueprint is active
@@ -1105,32 +1047,23 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
             allowed = blueprint.filter_workers(list(worker_info.keys()), state)
             worker_info = {k: v for k, v in worker_info.items() if k in allowed}
         
-        worker_lines = []
+        # Convert to dict format: {name: description}
+        workers_dict = {}
         for name, info in worker_info.items():
-            line = f"- **{name}**: {info['description']}"
+            desc = info['description']
             if info.get('input_schema'):
-                line += f" (accepts structured input)"
-            worker_lines.append(line)
-        worker_list = "\n".join(worker_lines)
+                desc += " (accepts structured input)"
+            workers_dict[name] = desc
         
-        # Format base system prompt
-        system_prompt = self.supervisor_prompt.format(worker_list=worker_list)
+        # Build prompt using strategy
+        full_prompt = self.strategy.build_prompt(
+            context=context,
+            workers=workers_dict
+        )
         
-        # Inject blueprint context if active
+        # Append blueprint context if active
         if blueprint:
-            system_prompt += blueprint.get_prompt_context(state)
-        
-        # Inject JSON schema if not using simple prompts (helps LLMs follow structure)
-        if not self.config.simple_prompts:
-            try:
-                from .schemas import get_supervisor_json_schema, PYDANTIC_AVAILABLE
-                if PYDANTIC_AVAILABLE:
-                    schema = get_supervisor_json_schema()
-                    system_prompt += f"\n\n## Required JSON Schema\nYou MUST output JSON adhering to this schema:\n{json.dumps(schema, indent=2)}"
-            except ImportError:
-                pass
-        
-        full_prompt = f"{system_prompt}\n\n## Current State\n{context}\n\n## Your Decision (JSON only):"
+            full_prompt += blueprint.get_prompt_context(state)
         
         try:
             result = self.llm.generate(full_prompt)
@@ -1156,121 +1089,30 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
             else:
                 content = response
             
-            return self._parse_llm_response(content)
+            # Parse response using strategy
+            decision = self.strategy.parse_response(content)
+            
+            # Convert Strategy Decision -> SupervisorDecision
+            calls = []
+            for call in decision.calls:
+                calls.append(WorkerCall(
+                    worker_name=call["worker_name"],
+                    instructions=call.get("instructions", ""),
+                    inputs=call.get("inputs", {})
+                ))
+            
+            return SupervisorDecision(
+                action=decision.action,
+                calls=calls,
+                reasoning=decision.reasoning
+            )
+            
         except Exception as e:
             logger.error(f"LLM error: {e}")
             return SupervisorDecision(
                 action="fail",
                 reasoning=f"LLM error: {str(e)}"
             )
-
-    def _parse_llm_response(self, response: str) -> SupervisorDecision:
-        """Parse the JSON response from the LLM."""
-        
-        # First, try to extract JSON from markdown code blocks
-        def extract_from_code_block(text: str) -> Optional[str]:
-            """Extract JSON from ```json ... ``` blocks."""
-            patterns = [
-                r'```json\s*\n?(.*?)\n?```',  # ```json ... ```
-                r'```\s*\n?(.*?)\n?```',       # ``` ... ```
-            ]
-            for pattern in patterns:
-                match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-                if match:
-                    return match.group(1).strip()
-            return None
-        
-        # Try to find JSON object with matching braces
-        def find_json_object(text: str) -> Optional[str]:
-            start = text.find('{')
-            if start == -1:
-                return None
-            
-            depth = 0
-            for i, char in enumerate(text[start:], start):
-                if char == '{':
-                    depth += 1
-                elif char == '}':
-                    depth -= 1
-                    if depth == 0:
-                        return text[start:i+1]
-            return None
-        
-        # Try basic JSON repair for common issues
-        def repair_json(text: str) -> str:
-            """Attempt to fix common JSON issues."""
-            # Remove trailing commas before } or ]
-            text = re.sub(r',\s*([\}\]])', r'\1', text)
-            # Fix single quotes to double quotes
-            text = text.replace("'", '"')
-            # Fix unquoted keys
-            text = re.sub(r'(\{|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:', r'\1 "\2":', text)
-            return text
-        
-        # Try extraction methods in order
-        json_str = extract_from_code_block(response)
-        if not json_str:
-            json_str = find_json_object(response)
-        
-        if json_str:
-            # Try parsing, then repair and retry
-            for attempt in range(2):
-                try:
-                    data = json.loads(json_str)
-                    
-                    # Validate using Pydantic schemas if available
-                    try:
-                        from .schemas import validate_supervisor_response, PYDANTIC_AVAILABLE
-                        if PYDANTIC_AVAILABLE:
-                            validation_error = validate_supervisor_response(data)
-                            if validation_error:
-                                logger.warning(f"Schema validation failed: {validation_error}")
-                    except ImportError:
-                        pass  # No schema validation available
-                    
-                    action = data.get("action", "fail")
-                    reasoning = data.get("reasoning", "")
-                    
-                    # Parse calls
-                    calls = []
-                    if action == "call_independent" and "calls" in data:
-                        for call_data in data["calls"]:
-                            calls.append(WorkerCall(
-                                worker_name=call_data.get("worker", ""),
-                                instructions=call_data.get("instructions", ""),
-                                inputs=call_data.get("inputs", {})
-                            ))
-                    elif action == "call" and "worker" in data:
-                        calls.append(WorkerCall(
-                            worker_name=data.get("worker", ""),
-                            instructions=data.get("instructions", ""),
-                            inputs=data.get("inputs", {})
-                        ))
-                    
-                    return SupervisorDecision(
-                        action=action,
-                        calls=calls,
-                        reasoning=reasoning
-                    )
-                except json.JSONDecodeError:
-                    if attempt == 0:
-                        # Try repair on first failure
-                        json_str = repair_json(json_str)
-                    else:
-                        pass  # Give up after repair attempt
-                pass
-        
-        # Fallback parsing for non-JSON responses
-        response_lower = response.lower()
-        if "done" in response_lower:
-            return SupervisorDecision(action="done", reasoning="Parsed 'done' from response")
-        elif "fail" in response_lower:
-            return SupervisorDecision(action="fail", reasoning="Parsed 'fail' from response")
-        
-        return SupervisorDecision(
-            action="fail",
-            reasoning=f"Could not parse LLM response: {response[:100]}"
-        )
 
     def _apply_worker_output(self, state: Blackboard, output: WorkerOutput, worker_name: str) -> None:
         """Apply the worker's output to the blackboard."""

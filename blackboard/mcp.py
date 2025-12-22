@@ -278,22 +278,50 @@ class MCPServerWorker(Worker):
     def __init__(
         self,
         name: str,
-        command: str,
-        args: List[str],
+        command: str = None,
+        args: List[str] = None,
         description: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
-        tools: Optional[List[MCPTool]] = None
+        tools: Optional[List[MCPTool]] = None,
+        url: Optional[str] = None,  # SSE endpoint for remote MCP servers
+        llm_client: Optional[Any] = None  # LLM client for sampling requests
     ):
+        """
+        Initialize an MCP server worker.
+        
+        Supports two transport modes:
+        - **Stdio (local)**: Set command and args to spawn a local subprocess
+        - **SSE (remote)**: Set url to connect to a remote MCP server
+        
+        Args:
+            name: Worker name
+            command: Command to start local MCP server (stdio mode)
+            args: Arguments for the command
+            description: Human-readable description
+            env: Environment variables for the subprocess
+            tools: Pre-discovered tools (usually set via create())
+            url: SSE endpoint URL for remote MCP servers (e.g., "http://localhost:8080/sse")
+            llm_client: LLM client for handling sampling requests from the MCP server
+        """
+        if not command and not url:
+            raise ValueError("Either 'command' (for stdio) or 'url' (for SSE) must be provided")
+        
         self._name = name
         self._command = command
-        self._args = args
+        self._args = args or []
         self._env = env or {}
         self._tools = tools or []
+        self._url = url  # SSE endpoint
+        self._llm_client = llm_client  # For sampling
         self._description = description or self._generate_description()
+        
+        # Transport mode
+        self._transport_mode = "sse" if url else "stdio"
         
         # Persistent session management
         self._session: Optional["ClientSession"] = None
         self._stdio_context = None
+        self._sse_context = None
         self._session_context = None
         self._connected = False
     
@@ -323,29 +351,46 @@ class MCPServerWorker(Worker):
         """
         Establish a persistent connection to the MCP server.
         
-        This keeps the server process alive for all subsequent tool calls,
-        dramatically improving performance (1-2s overhead eliminated).
+        Supports two transport modes:
+        - **Stdio**: Spawns a local subprocess (command + args)
+        - **SSE**: Connects to a remote HTTP endpoint (url)
+        
+        This keeps the connection alive for all subsequent tool calls,
+        dramatically improving performance.
         
         Example:
-            server = await MCPServerWorker.create(...)
-            await server.connect()  # Start persistent session
+            # Stdio (local)
+            server = await MCPServerWorker.create(command="npx", args=[...])
             
-            # All calls reuse same process
+            # SSE (remote)
+            server = await MCPServerWorker.create(url="http://localhost:8080/sse")
+            
+            await server.connect()
             result = await server.call_tool("read_file", {"path": "a.txt"})
-            result = await server.call_tool("read_file", {"path": "b.txt"})
-            
-            await server.disconnect()  # Clean shutdown
+            await server.disconnect()
         """
         if self._connected:
             return
         
         try:
-            from mcp import ClientSession, StdioServerParameters
-            from mcp.client.stdio import stdio_client
+            from mcp import ClientSession
         except ImportError:
             raise ImportError(
                 "MCP package not installed. Install with: pip install 'blackboard-core[mcp]'"
             )
+        
+        if self._transport_mode == "sse":
+            await self._connect_sse(ClientSession)
+        else:
+            await self._connect_stdio(ClientSession)
+        
+        self._connected = True
+        logger.info(f"[{self._name}] Persistent connection established ({self._transport_mode})")
+    
+    async def _connect_stdio(self, ClientSession) -> None:
+        """Connect via stdio transport (local subprocess)."""
+        from mcp import StdioServerParameters
+        from mcp.client.stdio import stdio_client
         
         server_params = StdioServerParameters(
             command=self._command,
@@ -361,9 +406,84 @@ class MCPServerWorker(Worker):
         self._session_context = ClientSession(read, write)
         self._session = await self._session_context.__aenter__()
         await self._session.initialize()
+    
+    async def _connect_sse(self, ClientSession) -> None:
+        """Connect via SSE transport (remote HTTP endpoint)."""
+        try:
+            from mcp.client.sse import sse_client
+        except ImportError:
+            raise ImportError(
+                "MCP SSE client not available. Ensure mcp package is up to date."
+            )
         
-        self._connected = True
-        logger.info(f"[{self._name}] Persistent connection established")
+        # Enter the SSE context
+        self._sse_context = sse_client(self._url)
+        read, write = await self._sse_context.__aenter__()
+        
+        # Create session with optional sampling handler
+        if self._llm_client:
+            self._session_context = ClientSession(
+                read, write,
+                sampling_callback=self._handle_sampling_request
+            )
+        else:
+            self._session_context = ClientSession(read, write)
+        
+        self._session = await self._session_context.__aenter__()
+        await self._session.initialize()
+    
+    async def _handle_sampling_request(self, request) -> Any:
+        """
+        Handle sampling/createMessage requests from the MCP server.
+        
+        This enables "agentic tools" where the MCP server can ask
+        the client's LLM for help during tool execution.
+        
+        Example: A code analyzer might ask "What does this regex do?"
+        """
+        if not self._llm_client:
+            raise RuntimeError("Sampling requested but no llm_client provided")
+        
+        try:
+            from mcp.types import CreateMessageResult, TextContent
+        except ImportError:
+            raise ImportError("MCP types not available")
+        
+        # Extract the prompt from the request
+        if hasattr(request, 'messages') and request.messages:
+            last_message = request.messages[-1]
+            if hasattr(last_message, 'content'):
+                if hasattr(last_message.content, 'text'):
+                    prompt = last_message.content.text
+                else:
+                    prompt = str(last_message.content)
+            else:
+                prompt = str(last_message)
+        else:
+            prompt = str(request)
+        
+        logger.debug(f"[{self._name}] Sampling request: {prompt[:100]}...")
+        
+        # Call the LLM
+        import asyncio
+        if asyncio.iscoroutinefunction(self._llm_client.generate):
+            response = await self._llm_client.generate(prompt)
+        else:
+            response = self._llm_client.generate(prompt)
+        
+        # Handle LLMResponse objects
+        if hasattr(response, 'content'):
+            response_text = response.content
+        else:
+            response_text = str(response)
+        
+        logger.debug(f"[{self._name}] Sampling response: {response_text[:100]}...")
+        
+        return CreateMessageResult(
+            content=TextContent(type="text", text=response_text),
+            model=getattr(self._llm_client, 'model', 'unknown'),
+            role="assistant"
+        )
     
     async def disconnect(self) -> None:
         """Close the persistent connection to the MCP server."""
@@ -375,12 +495,15 @@ class MCPServerWorker(Worker):
                 await self._session_context.__aexit__(None, None, None)
             if self._stdio_context:
                 await self._stdio_context.__aexit__(None, None, None)
+            if self._sse_context:
+                await self._sse_context.__aexit__(None, None, None)
         except Exception as e:
             logger.warning(f"[{self._name}] Error during disconnect: {e}")
         finally:
             self._session = None
             self._session_context = None
             self._stdio_context = None
+            self._sse_context = None
             self._connected = False
             logger.info(f"[{self._name}] Disconnected")
     
@@ -427,6 +550,122 @@ class MCPServerWorker(Worker):
         
         return "\n".join(content_parts)
 
+    async def list_resources(self) -> List[Dict[str, Any]]:
+        """
+        List all resources exposed by this MCP server.
+        
+        Resources are file-like data that the MCP server makes available.
+        Use read_resource() to fetch the content.
+        
+        Returns:
+            List of resource metadata dicts with uri, name, mimeType
+            
+        Example:
+            async with server:
+                resources = await server.list_resources()
+                for r in resources:
+                    print(f"{r['name']}: {r['uri']}")
+        """
+        if not self.is_connected:
+            raise RuntimeError(
+                f"[{self._name}] Not connected. Call connect() or use 'async with server:'"
+            )
+        
+        try:
+            result = await self._session.list_resources()
+            return [
+                {
+                    "uri": str(r.uri),
+                    "name": r.name,
+                    "mimeType": getattr(r, 'mimeType', None),
+                    "description": getattr(r, 'description', None)
+                }
+                for r in result.resources
+            ]
+        except Exception as e:
+            logger.warning(f"[{self._name}] Failed to list resources: {e}")
+            return []
+    
+    async def read_resource(self, uri: str) -> str:
+        """
+        Read a resource by URI.
+        
+        Args:
+            uri: Resource URI (from list_resources)
+            
+        Returns:
+            Resource content as string
+            
+        Example:
+            async with server:
+                resources = await server.list_resources()
+                if resources:
+                    content = await server.read_resource(resources[0]['uri'])
+                    print(content)
+        """
+        if not self.is_connected:
+            raise RuntimeError(
+                f"[{self._name}] Not connected. Call connect() or use 'async with server:'"
+            )
+        
+        try:
+            from pydantic import AnyUrl
+        except ImportError:
+            # Fallback if pydantic not available
+            AnyUrl = str
+        
+        result = await self._session.read_resource(AnyUrl(uri))
+        
+        # Extract text content
+        parts = []
+        for content_block in result.contents:
+            if hasattr(content_block, 'text'):
+                parts.append(content_block.text)
+            else:
+                parts.append(str(content_block))
+        
+        return "\n".join(parts)
+    
+    async def load_resources_to_state(self, state: Blackboard, max_resources: int = 10) -> int:
+        """
+        Load all resources from this MCP server into the Blackboard as artifacts.
+        
+        This is useful for injecting MCP resources into the agent's context.
+        
+        Args:
+            state: Blackboard to add resources to
+            max_resources: Maximum number of resources to load
+            
+        Returns:
+            Number of resources loaded
+            
+        Example:
+            async with server:
+                loaded = await server.load_resources_to_state(state)
+                print(f"Loaded {loaded} resources")
+        """
+        resources = await self.list_resources()
+        loaded = 0
+        
+        for resource in resources[:max_resources]:
+            try:
+                content = await self.read_resource(resource['uri'])
+                state.add_artifact(Artifact(
+                    type="mcp_resource",
+                    content=content,
+                    creator=self._name,
+                    metadata={
+                        "uri": resource['uri'],
+                        "name": resource.get('name'),
+                        "mimeType": resource.get('mimeType')
+                    }
+                ))
+                loaded += 1
+                logger.debug(f"[{self._name}] Loaded resource: {resource['uri']}")
+            except Exception as e:
+                logger.warning(f"[{self._name}] Failed to load resource {resource['uri']}: {e}")
+        
+        return loaded
     
     def _generate_description(self) -> str:
         """Generate description from available tools."""
@@ -476,24 +715,30 @@ class MCPServerWorker(Worker):
     async def create(
         cls,
         name: str,
-        command: str,
-        args: List[str],
+        command: str = None,
+        args: List[str] = None,
         description: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
-        timeout: float = 30.0
+        timeout: float = 30.0,
+        url: Optional[str] = None,
+        llm_client: Optional[Any] = None
     ) -> "MCPServerWorker":
         """
         Create and initialize an MCP server worker.
         
-        This connects to the server and discovers available tools.
+        Supports two transport modes:
+        - **Stdio (local)**: Set command and args to spawn a subprocess
+        - **SSE (remote)**: Set url to connect via HTTP/SSE
         
         Args:
             name: Worker name
-            command: Command to start MCP server
+            command: Command to start MCP server (stdio mode)
             args: Arguments for command
             description: Optional description
             env: Environment variables for server
             timeout: Connection timeout in seconds
+            url: SSE endpoint URL (e.g., "http://localhost:8080/sse")
+            llm_client: LLM client for sampling requests
             
         Returns:
             Initialized MCPServerWorker with discovered tools
@@ -501,7 +746,52 @@ class MCPServerWorker(Worker):
         Raises:
             ImportError: If mcp package is not installed
             TimeoutError: If connection times out
+            ValueError: If neither command nor url provided
+            
+        Examples:
+            # Stdio (local subprocess)
+            server = await MCPServerWorker.create(
+                name="Filesystem",
+                command="npx",
+                args=["-y", "@modelcontextprotocol/server-fs", "/tmp"]
+            )
+            
+            # SSE (remote HTTP)
+            server = await MCPServerWorker.create(
+                name="RemoteAPI",
+                url="http://mcp-server:8080/sse",
+                llm_client=my_llm  # For sampling
+            )
         """
+        if not command and not url:
+            raise ValueError("Either 'command' (for stdio) or 'url' (for SSE) must be provided")
+        
+        tools: List[MCPTool] = []
+        
+        if url:
+            # SSE transport
+            tools = await cls._discover_tools_sse(name, url, timeout)
+        else:
+            # Stdio transport
+            tools = await cls._discover_tools_stdio(name, command, args or [], env, timeout)
+        
+        return cls(
+            name=name,
+            command=command,
+            args=args,
+            description=description,
+            env=env,
+            tools=tools,
+            url=url,
+            llm_client=llm_client
+        )
+    
+    @classmethod
+    async def _discover_tools_stdio(
+        cls, name: str, command: str, args: List[str], 
+        env: Optional[Dict[str, str]], timeout: float
+    ) -> List[MCPTool]:
+        """Discover tools via stdio transport."""
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
@@ -533,7 +823,7 @@ class MCPServerWorker(Worker):
                                 input_schema=tool.inputSchema or {}
                             ))
                         
-                        logger.info(f"[{name}] Discovered {len(tools)} tools")
+                        logger.info(f"[{name}] Discovered {len(tools)} tools via stdio")
                         
         except asyncio.TimeoutError:
             raise TimeoutError(f"MCP server '{name}' connection timed out after {timeout}s")
@@ -541,14 +831,47 @@ class MCPServerWorker(Worker):
             logger.error(f"[{name}] Failed to connect: {e}")
             raise
         
-        return cls(
-            name=name,
-            command=command,
-            args=args,
-            description=description,
-            env=env,
-            tools=tools
-        )
+        return tools
+    
+    @classmethod
+    async def _discover_tools_sse(
+        cls, name: str, url: str, timeout: float
+    ) -> List[MCPTool]:
+        """Discover tools via SSE transport."""
+        try:
+            from mcp import ClientSession
+            from mcp.client.sse import sse_client
+        except ImportError:
+            raise ImportError(
+                "MCP SSE client not available. Install with: pip install 'blackboard-core[mcp]'"
+            )
+        
+        tools: List[MCPTool] = []
+        
+        try:
+            async with asyncio.timeout(timeout):
+                async with sse_client(url) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        
+                        # Discover tools
+                        tools_result = await session.list_tools()
+                        for tool in tools_result.tools:
+                            tools.append(MCPTool(
+                                name=tool.name,
+                                description=tool.description or "",
+                                input_schema=tool.inputSchema or {}
+                            ))
+                        
+                        logger.info(f"[{name}] Discovered {len(tools)} tools via SSE")
+                        
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"MCP server '{name}' SSE connection timed out after {timeout}s")
+        except Exception as e:
+            logger.error(f"[{name}] Failed to connect via SSE: {e}")
+            raise
+        
+        return tools
     
     async def run(
         self,

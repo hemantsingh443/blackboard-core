@@ -48,15 +48,28 @@ Example:
     
     # Use with orchestrator
     result = await orchestrator.run(goal="Write a blog post", blueprint=blog_flow)
+
+Simplified Patterns:
+    from blackboard.flow import SequentialPipeline, Router
+    
+    # One-liner sequential execution
+    pipeline = SequentialPipeline([Searcher(), Writer(), Critic()])
+    
+    # Supervisor chooses best worker
+    router = Router([MathAgent, CodeAgent, ResearchAgent])
 """
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, TYPE_CHECKING
 
 from .state import Blackboard, Status
 
+if TYPE_CHECKING:
+    from .protocols import Worker
+
 logger = logging.getLogger("blackboard.flow")
+
 
 
 # =============================================================================
@@ -409,4 +422,108 @@ If issues are found, the writer may need to revise.""",
                 max_iterations=3
             )
         ]
+    )
+
+
+# =============================================================================
+# Simplified Pattern Functions
+# =============================================================================
+
+def SequentialPipeline(
+    workers: List["Worker"],
+    name: str = "Sequential Pipeline"
+) -> Blueprint:
+    """
+    Create a sequential pipeline where each worker runs in strict order.
+    
+    This is the simplest way to force A → B → C execution. Each worker
+    gets exactly one step, and must complete before the next can run.
+    
+    Args:
+        workers: List of Worker instances to execute in order
+        name: Optional name for the blueprint
+        
+    Returns:
+        A Blueprint that enforces sequential execution
+        
+    Example:
+        from blackboard.flow import SequentialPipeline
+        
+        pipeline = SequentialPipeline([
+            SearchWorker(),
+            WriterWorker(),
+            CriticWorker()
+        ])
+        
+        result = await orchestrator.run(
+            goal="Research and write an article",
+            blueprint=pipeline
+        )
+    """
+    steps = []
+    for i, worker in enumerate(workers):
+        steps.append(Step(
+            name=f"step_{i+1}_{worker.name}",
+            description=f"Execute {worker.name}",
+            allowed_workers=[worker.name],
+            instructions=f"You MUST call {worker.name}. This is step {i+1} of {len(workers)}.",
+            max_iterations=1  # Force single execution per step
+        ))
+    
+    return Blueprint(name=name, steps=steps)
+
+
+def Router(
+    workers: List["Worker"],
+    name: str = "Router",
+    selection_prompt: str = ""
+) -> Blueprint:
+    """
+    Create a router where the supervisor chooses the best worker for the task.
+    
+    All workers are available in a single step. The supervisor analyzes
+    the goal and selects the most appropriate worker.
+    
+    Args:
+        workers: List of Worker instances to choose from
+        name: Optional name for the blueprint
+        selection_prompt: Optional additional instructions for selection
+        
+    Returns:
+        A Blueprint with a single routing step
+        
+    Example:
+        from blackboard.flow import Router
+        
+        router = Router([
+            MathAgent(),
+            CodeAgent(),
+            ResearchAgent()
+        ], selection_prompt="Choose based on the user's query type")
+        
+        result = await orchestrator.run(
+            goal="Solve this equation: 2x + 5 = 15",
+            blueprint=router
+        )
+    """
+    worker_names = [w.name for w in workers]
+    worker_list = ", ".join(worker_names)
+    
+    instructions = f"""Analyze the goal and choose the SINGLE best worker for this task.
+
+Available specialists: {worker_list}
+
+{selection_prompt}
+
+Choose wisely - you can only pick ONE worker."""
+    
+    return Blueprint(
+        name=name,
+        steps=[Step(
+            name="route",
+            description="Select and execute the best worker for this task",
+            allowed_workers=worker_names,
+            instructions=instructions,
+            max_iterations=1
+        )]
     )

@@ -5,4 +5,5 @@ __pycache__
 session.json
 .env 
 venv
-api_sessions
+api_sessions 
+demos

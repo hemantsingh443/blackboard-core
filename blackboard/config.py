@@ -55,6 +55,7 @@ class BlackboardConfig:
     use_tool_calling: bool = True
     allow_json_fallback: bool = True
     strict_tools: bool = False
+    reasoning_strategy: str = "oneshot"  # "oneshot" or "cot" (chain-of-thought)
     
     # Execution modes
     enable_parallel: bool = True
@@ -122,6 +123,7 @@ class BlackboardConfig:
             "use_tool_calling": get_bool("use_tool_calling", True),
             "allow_json_fallback": get_bool("allow_json_fallback", True),
             "strict_tools": get_bool("strict_tools", False),
+            "reasoning_strategy": get_str("reasoning_strategy", "oneshot"),
             "enable_parallel": get_bool("enable_parallel", True),
             "auto_summarize": get_bool("auto_summarize", False),
             "auto_save_path": get_str("auto_save_path", None),
@@ -144,6 +146,7 @@ class BlackboardConfig:
             "use_tool_calling": self.use_tool_calling,
             "allow_json_fallback": self.allow_json_fallback,
             "strict_tools": self.strict_tools,
+            "reasoning_strategy": self.reasoning_strategy,
             "enable_parallel": self.enable_parallel,
             "auto_summarize": self.auto_summarize,
             "auto_save_path": self.auto_save_path,

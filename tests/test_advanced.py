@@ -213,16 +213,14 @@ class TestUsageTracking:
 
 
 class TestJSONParsing:
-    """Tests for improved JSON parsing."""
+    """Tests for improved JSON parsing via reasoning strategies."""
     
     def test_parse_json_in_code_block(self):
         """Test parsing JSON from markdown code block."""
-        llm = MockLLM([
-            '```json\n{"action": "done", "reasoning": "Test"}\n```'
-        ])
-        orch = Orchestrator(llm=llm, workers=[SimpleWorker()])
+        from blackboard.reasoning import OneShotStrategy
         
-        decision = orch._parse_llm_response(
+        strategy = OneShotStrategy()
+        decision = strategy.parse_response(
             '```json\n{"action": "done", "reasoning": "Test"}\n```'
         )
         
@@ -230,8 +228,9 @@ class TestJSONParsing:
     
     def test_parse_json_with_chatter(self):
         """Test parsing JSON with surrounding text."""
-        orch = Orchestrator(llm=MockLLM([]), workers=[SimpleWorker()])
+        from blackboard.reasoning import OneShotStrategy
         
+        strategy = OneShotStrategy()
         response = """
         Based on the current state, I think we should proceed.
         
@@ -240,19 +239,19 @@ class TestJSONParsing:
         Let me know if you have questions!
         """
         
-        decision = orch._parse_llm_response(response)
+        decision = strategy.parse_response(response)
         
         assert decision.action == "call"
-        assert decision.calls[0].worker_name == "Simple"
+        assert decision.calls[0]["worker_name"] == "Simple"
     
-    def test_parse_json_repair_trailing_comma(self):
-        """Test JSON repair for trailing commas."""
-        orch = Orchestrator(llm=MockLLM([]), workers=[SimpleWorker()])
+    def test_parse_json_handles_invalid(self):
+        """Test JSON parsing fails gracefully for invalid JSON."""
+        from blackboard.reasoning import OneShotStrategy
         
-        response = '{"action": "done", "reasoning": "Test",}'  # Trailing comma
-        decision = orch._parse_llm_response(response)
+        strategy = OneShotStrategy()
+        decision = strategy.parse_response("not valid json at all")
         
-        assert decision.action == "done"
+        assert decision.action == "fail"
 
 
 class TestContextSummarization:

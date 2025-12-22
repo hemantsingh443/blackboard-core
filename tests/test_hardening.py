@@ -367,8 +367,8 @@ class TestGracefulShutdown:
 class TestSupervisorSchema:
     """Tests for supervisor prompt schema improvements."""
     
-    def test_simple_prompts_uses_simple_prompt(self):
-        """simple_prompts=True should use SIMPLE_SUPERVISOR_PROMPT."""
+    def test_simple_prompts_uses_default_strategy(self):
+        """simple_prompts=True should still use default strategy (prompts are in strategy now)."""
         llm = MockLLM([])
         config = BlackboardConfig(simple_prompts=True)
         
@@ -378,11 +378,26 @@ class TestSupervisorSchema:
             config=config
         )
         
-        assert "SIMPLE" not in orch.SUPERVISOR_SYSTEM_PROMPT
-        assert "Reply with a single JSON" in orch.supervisor_prompt
+        # Strategy should be the default OneShot strategy
+        from blackboard.reasoning import OneShotStrategy
+        assert isinstance(orch.strategy, OneShotStrategy)
     
-    def test_default_uses_full_prompt(self):
-        """Default config should use full SUPERVISOR_SYSTEM_PROMPT."""
+    def test_cot_config_uses_cot_strategy(self):
+        """reasoning_strategy='cot' should use ChainOfThoughtStrategy."""
+        llm = MockLLM([])
+        config = BlackboardConfig(reasoning_strategy="cot")
+        
+        orch = Orchestrator(
+            llm=llm,
+            workers=[SimpleWorker()],
+            config=config
+        )
+        
+        from blackboard.reasoning import ChainOfThoughtStrategy
+        assert isinstance(orch.strategy, ChainOfThoughtStrategy)
+    
+    def test_default_uses_oneshot_strategy(self):
+        """Default config should use OneShotStrategy."""
         llm = MockLLM([])
         
         orch = Orchestrator(
@@ -390,7 +405,8 @@ class TestSupervisorSchema:
             workers=[SimpleWorker()]
         )
         
-        assert "Independent Worker Calls" in orch.supervisor_prompt
+        from blackboard.reasoning import OneShotStrategy
+        assert isinstance(orch.strategy, OneShotStrategy)
     
     def test_pydantic_schema_available(self):
         """Pydantic schemas should be importable if pydantic is installed."""

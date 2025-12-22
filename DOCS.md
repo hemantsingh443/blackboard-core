@@ -13,15 +13,17 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 7. [Tool Calling](#tool-calling)
 8. [Memory System](#memory-system)
 9. [Persistence](#persistence)
-10. [Model Context Protocol](#model-context-protocol)
-11. [OpenTelemetry](#opentelemetry)
-12. [Session Replay](#session-replay)
-13. [Terminal UI](#terminal-ui)
-14. [Standard Library Workers](#standard-library-workers)
-15. [Blackboard Serve (API Deployment)](#blackboard-serve-api-deployment)
-16. [Events & Observability](#events--observability)
-17. [Error Handling](#error-handling)
-18. [Best Practices](#best-practices)
+10. [Model Context Protocol (MCP)](#model-context-protocol-mcp)
+11. [Blueprints (Structured Workflows)](#blueprints-structured-workflows)
+12. [Reasoning Strategies](#reasoning-strategies)
+13. [OpenTelemetry](#opentelemetry)
+14. [Session Replay](#session-replay)
+15. [Terminal UI](#terminal-ui)
+16. [Standard Library Workers](#standard-library-workers)
+17. [Blackboard Serve (API Deployment)](#blackboard-serve-api-deployment)
+18. [Events & Observability](#events--observability)
+19. [Error Handling](#error-handling)
+20. [Best Practices](#best-practices)
 
 ---
 
@@ -84,6 +86,67 @@ Workers are the agents that perform actual work. Each worker:
 - Performs a task (often using an LLM)
 - Returns artifacts and/or feedback
 
+### The Magic Decorator (Recommended)
+
+The simplest way to create workers - just add type hints:
+
+```python
+from blackboard import worker
+from blackboard.state import Blackboard
+
+# Simple function - schema auto-generated from type hints
+@worker
+def calculate(a: int, b: int, operation: str = "add") -> str:
+    """Performs basic math operations."""
+    if operation == "add":
+        return str(a + b)
+    return str(a - b)
+
+# With state access - just add a 'state' parameter
+@worker
+def summarize(state: Blackboard) -> str:
+    """Summarizes the current artifacts."""
+    return f"Goal: {state.goal}, Artifacts: {len(state.artifacts)}"
+
+# Mixed: user inputs + state
+@worker
+def analyze(topic: str, depth: int, state: Blackboard) -> str:
+    """Analyzes a topic at specified depth."""
+    return f"Analyzing {topic} at depth {depth} for goal: {state.goal}"
+
+# Async support
+@worker
+async def research(topic: str) -> str:
+    """Researches a topic online."""
+    await asyncio.sleep(0.1)  # Simulated async work
+    return f"Research on {topic}..."
+
+# With explicit options
+@worker(artifact_type="code", parallel_safe=True)
+def generate_code(language: str = "python") -> str:
+    """Generates boilerplate code."""
+    return f"# {language} code here"
+```
+
+### Critic Decorator
+
+For workers that provide feedback instead of artifacts:
+
+```python
+from blackboard import critic
+
+@critic(name="CodeReviewer", description="Reviews code quality")
+def review_code(state: Blackboard) -> tuple[bool, str]:
+    last = state.get_last_artifact()
+    if not last or "def " not in last.content:
+        return False, "No function definitions found"
+    return True, "Code looks good!"
+```
+
+### Class-Based Workers (Advanced)
+
+For complex workers that need initialization or internal state:
+
 ```python
 from blackboard import Worker, WorkerOutput, Artifact, Feedback, Blackboard
 
@@ -113,36 +176,6 @@ class ResearchWorker(Worker):
                 metadata={"topic": topic}
             )
         )
-
-
-class CriticWorker(Worker):
-    name = "Critic"
-    description = "Reviews artifacts and provides feedback"
-    
-    async def run(self, state: Blackboard, inputs=None) -> WorkerOutput:
-        # Get the most recent artifact to review
-        artifact = state.get_last_artifact()
-        
-        if not artifact:
-            return WorkerOutput(
-                feedback=Feedback(
-                    source=self.name,
-                    critique="No artifact to review",
-                    passed=False
-                )
-            )
-        
-        # Your review logic here
-        is_good = len(artifact.content) > 100
-        
-        return WorkerOutput(
-            feedback=Feedback(
-                source=self.name,
-                artifact_id=artifact.id,
-                critique="Content is detailed enough" if is_good else "Needs more detail",
-                passed=is_good
-            )
-        )
 ```
 
 ### Worker Best Practices
@@ -150,7 +183,8 @@ class CriticWorker(Worker):
 1. **Single Responsibility** - Each worker should do one thing well
 2. **Stateless** - Workers should not store state between calls
 3. **Descriptive Names** - The supervisor LLM uses names to choose workers
-4. **Input Schema** - Define schemas for complex inputs
+4. **Type Hints** - Always use type hints for auto-schema generation
+
 
 ---
 
@@ -224,20 +258,28 @@ class OpenAIToolLLM(ToolCallingLLMClient):
 
 ```python
 import asyncio
-from blackboard import Orchestrator
+from blackboard import Orchestrator, BlackboardConfig
 
 async def main():
+    # Option 1: Direct configuration
     orchestrator = Orchestrator(
         llm=OpenAILLM(),
-        workers=[ResearchWorker(), CriticWorker()],
+        workers=[write, critique],  # Magic decorator workers
         
         # Options
         verbose=True,              # Enable logging
         enable_parallel=True,      # Allow parallel worker execution
         use_tool_calling=True,     # Use native tool calling
-        strict_tools=False,        # Crash on tool config errors
-        allow_json_fallback=True,  # Fallback to JSON if tools fail
     )
+    
+    # Option 2: Using BlackboardConfig (recommended for production)
+    config = BlackboardConfig(
+        max_steps=50,
+        reasoning_strategy="cot",  # Chain-of-Thought for smarter decisions
+        enable_parallel=True,
+        verbose=True
+    )
+    orchestrator = Orchestrator(llm=llm, workers=workers, config=config)
     
     result = await orchestrator.run(
         goal="Research AI safety and write a summary",
@@ -252,6 +294,7 @@ asyncio.run(main())
 ```
 
 ### Resuming a Session
+
 
 ```python
 # Resume from existing state
@@ -1057,3 +1100,165 @@ async def test_research_worker():
     result = await worker.run(state, {"topic": "AI"})
     assert result.artifact is not None
 ```
+
+---
+
+## Model Context Protocol (MCP)
+
+MCP enables connecting to external tools without writing code.
+
+### Basic Usage (Stdio)
+
+```python
+from blackboard.mcp import MCPServerWorker
+
+# Connect to local MCP server
+server = await MCPServerWorker.create(
+    name="Filesystem",
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-fs", "/tmp"]
+)
+
+# Expand to individual workers (recommended)
+workers = server.expand_to_workers()
+orchestrator = Orchestrator(llm=llm, workers=workers)
+```
+
+### SSE Transport (Remote Servers)
+
+Connect to remote/Dockerized MCP servers via HTTP:
+
+```python
+# Connect via SSE endpoint
+server = await MCPServerWorker.create(
+    name="RemoteAPI",
+    url="http://mcp-server:8080/sse"
+)
+```
+
+### Sampling Support
+
+Let MCP tools ask the LLM for help:
+
+```python
+server = await MCPServerWorker.create(
+    name="CodeAnalyzer",
+    url="http://localhost:8080/sse",
+    llm_client=my_llm  # For sampling requests
+)
+```
+
+### MCP Resources
+
+Access file-like data from MCP servers:
+
+```python
+async with server:
+    # List available resources
+    resources = await server.list_resources()
+    
+    # Read a resource
+    content = await server.read_resource(resources[0]['uri'])
+    
+    # Load all resources into Blackboard
+    loaded = await server.load_resources_to_state(state)
+```
+
+---
+
+## Blueprints (Structured Workflows)
+
+Blueprints constrain the orchestrator to follow specific patterns.
+
+### SequentialPipeline
+
+Force strict A → B → C execution:
+
+```python
+from blackboard.flow import SequentialPipeline
+
+pipeline = SequentialPipeline([
+    SearchWorker(),
+    WriterWorker(),
+    CriticWorker()
+])
+
+result = await orchestrator.run(
+    goal="Research and write an article",
+    blueprint=pipeline
+)
+```
+
+### Router
+
+Supervisor chooses the best worker for the task:
+
+```python
+from blackboard.flow import Router
+
+router = Router([
+    MathAgent(),
+    CodeAgent(),
+    ResearchAgent()
+], selection_prompt="Choose based on the query type")
+
+result = await orchestrator.run(
+    goal="Solve 2x + 5 = 15",
+    blueprint=router
+)
+```
+
+### Custom Blueprints
+
+Define multi-step workflows with detailed control:
+
+```python
+from blackboard.flow import Blueprint, Step
+
+blog_flow = Blueprint(
+    name="Blog Writing",
+    steps=[
+        Step(
+            name="research",
+            allowed_workers=["WebSearch", "Browser"],
+            instructions="Gather information only"
+        ),
+        Step(
+            name="write",
+            allowed_workers=["Writer"],
+            instructions="Write based on research"
+        ),
+        Step(
+            name="review",
+            allowed_workers=["Critic"],
+            exit_condition=lambda s: s.get_latest_feedback().passed
+        )
+    ]
+)
+```
+
+---
+
+## Reasoning Strategies
+
+Control how the supervisor LLM reasons about decisions.
+
+### OneShot (Default)
+
+Fast, single-pass decision making:
+
+```python
+from blackboard import BlackboardConfig
+
+config = BlackboardConfig(reasoning_strategy="oneshot")
+```
+
+### Chain-of-Thought
+
+Explicit reasoning before decisions:
+
+```python
+config = BlackboardConfig(reasoning_strategy="cot")
+```
+
+The supervisor will produce structured thinking before each decision.

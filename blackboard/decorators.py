@@ -1,30 +1,40 @@
 """
 Functional Worker Decorators
 
-Provides a simple decorator-based API for creating workers.
-Reduces boilerplate from ~15 lines to ~3 lines.
+Provides a decorator-based API for creating workers with automatic
+input schema generation from type hints.
 
 Example:
-    @worker(name="Adder", description="Adds two numbers")
+    @worker
     def add(a: int, b: int) -> int:
+        '''Adds two numbers.'''
         return a + b
 
-    @worker(name="CodeWriter", description="Writes code", artifact_type="code")
-    async def write_code(state: Blackboard, inputs: WorkerInput) -> str:
-        return "def hello(): pass"
+    @worker(artifact_type="code")
+    async def write_code(topic: str, state: Blackboard) -> str:
+        '''Writes code about a topic.'''
+        return f"def hello_{topic}(): pass"
 """
 
 import asyncio
 import inspect
-from functools import wraps
-from typing import Any, Callable, Dict, Optional, Type, get_type_hints, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union, get_type_hints
+
+from pydantic import BaseModel, create_model
 
 from .protocols import Worker, WorkerOutput, WorkerInput
-from .state import Artifact, Blackboard
+from .state import Artifact, Blackboard, Feedback
 
 
 class FunctionalWorker(Worker):
-    """Worker that wraps a function."""
+    """
+    Worker that wraps a standard Python function.
+    
+    Handles:
+    - Dynamic input parsing from Pydantic models
+    - Automatic state injection for parameters named 'state'
+    - Output wrapping (raw values -> Artifact)
+    """
     
     def __init__(
         self,
@@ -33,7 +43,7 @@ class FunctionalWorker(Worker):
         worker_description: str,
         worker_artifact_type: str = "text",
         worker_parallel_safe: bool = False,
-        worker_input_schema: Optional[Type[WorkerInput]] = None
+        worker_input_schema: Optional[Type[BaseModel]] = None
     ):
         self._fn = fn
         self._name = worker_name
@@ -41,15 +51,12 @@ class FunctionalWorker(Worker):
         self._artifact_type = worker_artifact_type
         self._parallel_safe = worker_parallel_safe
         self._input_schema = worker_input_schema
-        
-        # Analyze function signature
-        sig = inspect.signature(fn)
-        self._params = list(sig.parameters.values())
         self._is_async = asyncio.iscoroutinefunction(fn)
         
-        # Determine function type
-        self._has_state_param = len(self._params) > 0 and self._params[0].name == "state"
-        self._has_inputs_param = len(self._params) > 1 and self._params[1].name == "inputs"
+        # Analyze signature for state injection
+        sig = inspect.signature(fn)
+        self._params = list(sig.parameters.keys())
+        self._has_state_param = "state" in self._params
     
     @property
     def name(self) -> str:
@@ -64,7 +71,7 @@ class FunctionalWorker(Worker):
         return self._parallel_safe
     
     @property
-    def input_schema(self) -> Optional[Type[WorkerInput]]:
+    def input_schema(self) -> Optional[Type[BaseModel]]:
         return self._input_schema
     
     async def run(
@@ -72,50 +79,50 @@ class FunctionalWorker(Worker):
         state: Blackboard,
         inputs: Optional[WorkerInput] = None
     ) -> WorkerOutput:
-        """Execute the wrapped function and return WorkerOutput."""
+        """Execute the wrapped function."""
         
-        # Build arguments based on function signature
-        if self._has_state_param and self._has_inputs_param:
-            # Full signature: (state, inputs)
-            result = self._fn(state, inputs)
-        elif self._has_state_param:
-            # State only: (state)
-            result = self._fn(state)
-        elif inputs and hasattr(inputs, '__dict__'):
-            # Custom args from inputs
-            kwargs = {}
-            for param in self._params:
-                if hasattr(inputs, param.name):
-                    kwargs[param.name] = getattr(inputs, param.name)
-                elif param.default != inspect.Parameter.empty:
-                    kwargs[param.name] = param.default
-            result = self._fn(**kwargs)
-        else:
-            # No args - use defaults
-            kwargs = {}
-            for param in self._params:
-                if param.default != inspect.Parameter.empty:
-                    kwargs[param.name] = param.default
-            if kwargs:
-                result = self._fn(**kwargs)
+        # Build kwargs from inputs
+        kwargs: Dict[str, Any] = {}
+        
+        if inputs:
+            # Get all fields from the input model
+            input_data = inputs.model_dump(exclude_unset=False)
+            # Filter to only include params the function expects
+            for key, value in input_data.items():
+                if key in self._params and key != "state":
+                    kwargs[key] = value
+        
+        # Inject state if function expects it
+        if self._has_state_param:
+            kwargs["state"] = state
+        
+        # Call function
+        try:
+            if self._is_async:
+                result = await self._fn(**kwargs)
             else:
-                result = self._fn()
+                result = self._fn(**kwargs)
+        except TypeError as e:
+            # Handle missing required arguments gracefully
+            raise RuntimeError(
+                f"Worker '{self._name}' call failed. "
+                f"Expected params: {self._params}, got: {list(kwargs.keys())}. "
+                f"Error: {e}"
+            ) from e
         
-        # Await if async
-        if asyncio.iscoroutine(result):
-            result = await result
-        
-        # Handle different return types
+        # Wrap result
         if isinstance(result, WorkerOutput):
             return result
         elif isinstance(result, Artifact):
             return WorkerOutput(artifact=result)
+        elif isinstance(result, Feedback):
+            return WorkerOutput(feedback=result)
         else:
-            # Wrap raw result in Artifact
+            content = str(result) if result is not None else "Done"
             return WorkerOutput(
                 artifact=Artifact(
                     type=self._artifact_type,
-                    content=str(result) if not isinstance(result, str) else result,
+                    content=content,
                     creator=self._name
                 )
             )
@@ -125,79 +132,137 @@ class FunctionalWorker(Worker):
 
 
 def worker(
-    name: str,
-    description: str,
+    _fn: Optional[Callable] = None,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
     artifact_type: str = "text",
     parallel_safe: bool = False,
     input_schema: Optional[Type[WorkerInput]] = None
-) -> Callable[[Callable], Worker]:
+) -> Union[Worker, Callable[[Callable], Worker]]:
     """
     Decorator to create a Worker from a function.
     
-    The decorated function can have one of these signatures:
-    1. Simple: () -> result
-    2. With state: (state: Blackboard) -> result
-    3. With inputs: (state: Blackboard, inputs: WorkerInput) -> result
-    4. Custom args: (arg1: type, arg2: type, ...) -> result
+    Automatically generates input schema from type hints if not provided.
+    Description is extracted from the docstring if not provided.
     
     Args:
-        name: Worker name (must be unique)
-        description: What this worker does
-        artifact_type: Type of artifact produced (e.g., "text", "code", "data")
-        parallel_safe: Whether this worker can run in parallel
-        input_schema: Optional custom input schema class
+        name: Worker name (defaults to function name, capitalized)
+        description: Worker description (defaults to first line of docstring)
+        artifact_type: Type of artifact produced (e.g., "text", "code")
+        parallel_safe: Whether this worker can run concurrently
+        input_schema: Manual schema override (auto-generated if None)
         
-    Returns:
-        A Worker instance wrapping the function
-        
-    Example:
-        @worker(name="Greeter", description="Says hello")
-        def greet(name: str = "World") -> str:
+    Usage:
+        # Minimal - everything auto-inferred
+        @worker
+        def greet(name: str) -> str:
+            '''Greets a person.'''
             return f"Hello, {name}!"
         
+        # With options
+        @worker(artifact_type="code", parallel_safe=True)
+        def generate_code(language: str = "python") -> str:
+            '''Generates boilerplate code.'''
+            return "# code here"
+        
         # With state access
-        @worker(name="Summarizer", description="Summarizes artifacts")
-        async def summarize(state: Blackboard) -> str:
-            last = state.get_last_artifact()
-            return f"Summary of {last.type}: ..."
+        @worker
+        def summarize(state: Blackboard) -> str:
+            '''Summarizes the current artifacts.'''
+            return f"Found {len(state.artifacts)} artifacts"
     """
-    def decorator(fn: Callable) -> Worker:
-        # Build input schema from function parameters if not provided
+    
+    def make_worker(fn: Callable) -> FunctionalWorker:
+        # 1. Determine name
+        worker_name = name or fn.__name__.replace("_", " ").title().replace(" ", "")
+        
+        # 2. Determine description from docstring
+        worker_description = description
+        if not worker_description:
+            doc = inspect.getdoc(fn)
+            if doc:
+                worker_description = doc.strip().split('\n')[0]
+            else:
+                worker_description = f"Worker: {worker_name}"
+        
+        # 3. Build input schema from signature
         schema = input_schema
         if schema is None:
-            sig = inspect.signature(fn)
-            params = list(sig.parameters.values())
-            has_state_param = len(params) > 0 and params[0].name == "state"
-            
-            if not has_state_param and params:
-                # Create dynamic schema from function params
-                schema_fields = {}
-                for param in params:
-                    if param.annotation != inspect.Parameter.empty:
-                        schema_fields[param.name] = param.annotation
-                
-                if schema_fields:
-                    # Create a dynamic WorkerInput subclass
-                    schema = type(
-                        f"{name}Input",
-                        (WorkerInput,),
-                        {"__annotations__": schema_fields}
-                    )
+            schema = _build_input_schema(fn, worker_name)
         
         return FunctionalWorker(
             fn=fn,
-            worker_name=name,
-            worker_description=description,
+            worker_name=worker_name,
+            worker_description=worker_description,
             worker_artifact_type=artifact_type,
             worker_parallel_safe=parallel_safe,
             worker_input_schema=schema
         )
     
-    return decorator
+    # Support @worker without parentheses
+    if _fn is not None:
+        return make_worker(_fn)
+    
+    return make_worker
+
+
+def _build_input_schema(fn: Callable, worker_name: str) -> Type[WorkerInput]:
+    """
+    Build a Pydantic model from function signature.
+    
+    Excludes 'state' parameter (injected at runtime).
+    """
+    sig = inspect.signature(fn)
+    
+    # Try to get type hints, fall back to empty dict
+    try:
+        type_hints = get_type_hints(fn)
+    except Exception:
+        type_hints = {}
+    
+    fields: Dict[str, Any] = {}
+    
+    for param_name, param in sig.parameters.items():
+        # Skip state parameter
+        if param_name == "state":
+            continue
+        
+        # Get type annotation
+        annotation = type_hints.get(param_name, Any)
+        
+        # Handle Blackboard type (also skip)
+        if annotation is Blackboard:
+            continue
+        
+        # Get default value
+        if param.default is inspect.Parameter.empty:
+            default = ...  # Required field
+        else:
+            default = param.default
+        
+        fields[param_name] = (annotation, default)
+    
+    if not fields:
+        # No additional fields needed
+        return WorkerInput
+    
+    # Create dynamic model
+    return create_model(
+        f"{worker_name}Input",
+        __base__=WorkerInput,
+        **fields
+    )
 
 
 class CriticWorker(Worker):
-    """Worker that gives feedback on artifacts."""
+    """
+    Worker specialized for providing feedback on artifacts.
+    
+    The wrapped function should return:
+    - bool: Simple pass/fail
+    - tuple[bool, str]: Pass/fail with explanation
+    """
     
     def __init__(
         self,
@@ -210,11 +275,10 @@ class CriticWorker(Worker):
         self._name = worker_name
         self._description = worker_description
         self._parallel_safe = worker_parallel_safe
+        self._is_async = asyncio.iscoroutinefunction(fn)
         
-        # Analyze function signature
         sig = inspect.signature(fn)
-        params = list(sig.parameters.values())
-        self._has_state_param = len(params) > 0 and params[0].name == "state"
+        self._has_state_param = "state" in sig.parameters
     
     @property
     def name(self) -> str:
@@ -233,9 +297,9 @@ class CriticWorker(Worker):
         state: Blackboard,
         inputs: Optional[WorkerInput] = None
     ) -> WorkerOutput:
-        """Execute the critic function and return feedback."""
-        from .state import Feedback
+        """Execute the critic function."""
         
+        # Call function
         if self._has_state_param:
             result = self._fn(state)
         else:
@@ -252,10 +316,10 @@ class CriticWorker(Worker):
             critique = "Approved" if passed else "Needs revision"
         else:
             raise ValueError(
-                f"Critic function must return (bool, str) or bool, got {type(result)}"
+                f"Critic '{self._name}' must return bool or (bool, str), "
+                f"got {type(result).__name__}"
             )
         
-        # Get artifact to link feedback to
         last_artifact = state.get_last_artifact()
         
         return WorkerOutput(
@@ -279,8 +343,9 @@ def critic(
     """
     Decorator for creating critic/reviewer workers.
     
-    The decorated function should return a tuple of (passed: bool, critique: str)
-    or just a bool (with auto-generated critique).
+    The decorated function should return:
+    - bool: Simple pass/fail (auto-generates critique message)
+    - tuple[bool, str]: Pass/fail with custom critique
     
     Example:
         @critic(name="CodeReviewer", description="Reviews code quality")
@@ -290,7 +355,8 @@ def critic(
                 return False, "No function definitions found"
             return True, "Code looks good!"
     """
-    def decorator(fn: Callable) -> Worker:
+    
+    def decorator(fn: Callable) -> CriticWorker:
         return CriticWorker(
             fn=fn,
             worker_name=name,

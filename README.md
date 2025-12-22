@@ -32,18 +32,14 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 
 - **Centralized State** - All agents share a typed Pydantic state model
 - **LLM Orchestration** - A supervisor LLM decides which worker runs next
+- **Magic Decorators** - Define workers with simple typed functions (auto-generated schemas)
 - **Async-First** - Built for high-performance async/await patterns
+- **Chain-of-Thought** - Pluggable reasoning strategies for smarter decisions
+- **State Idempotence** - Save, load, and resume sessions reliably
 - **LiteLLM Integration** - 100+ LLM providers via `LiteLLMClient`
 - **Model Context Protocol** - Connect to MCP servers for external tools
 - **OpenTelemetry** - Distributed tracing with span hierarchy
-- **Session Replay** - Record and replay for debugging
-- **Middleware System** - Budget tracking, logging, human approval
-- **Tool Calling** - Native support for OpenAI-style function calling
-- **Memory System** - Vector memory with pluggable embeddings
-- **Live TUI** - Real-time terminal visualization with markdown support
-- **Blueprints** - Structured workflows with step-by-step control
-- **Graph Memory** - GraphRAG with hybrid vector+graph search
-- **Reference UI** - Streamlit dashboard for API interaction
+- **Live TUI** - Real-time terminal visualization
 
 ## Installation
 
@@ -54,8 +50,6 @@ pip install blackboard-core
 pip install blackboard-core[mcp]        # Model Context Protocol
 pip install blackboard-core[telemetry]  # OpenTelemetry
 pip install blackboard-core[chroma]     # ChromaDB for memory
-pip install blackboard-core[graph]      # Graph Memory (NetworkX)
-pip install blackboard-core[ui]         # Streamlit Reference UI
 pip install blackboard-core[serve]      # FastAPI server
 pip install blackboard-core[all]        # Everything
 ```
@@ -66,17 +60,19 @@ pip install blackboard-core[all]        # Everything
 from blackboard import Orchestrator, worker
 from blackboard.llm import LiteLLMClient
 
-# Define workers with decorators
-@worker(name="Writer", description="Writes content")
+# Define workers with simple type hints - schemas are auto-generated!
+@worker
 def write(topic: str) -> str:
+    """Writes content about a topic."""
     return f"Article about {topic}..."
 
-@worker(name="Critic", description="Reviews content")  
+@worker
 def critique(content: str) -> str:
+    """Reviews content for quality."""
     return "Approved!" if len(content) > 50 else "Needs more detail"
 
 # Create orchestrator
-llm = LiteLLMClient(model="gpt-4o")  # Auto-detects API key
+llm = LiteLLMClient(model="gpt-4o")
 orchestrator = Orchestrator(llm=llm, workers=[write, critique])
 
 # Run
@@ -94,6 +90,68 @@ print(result.artifacts[-1].content)
 | **Supervisor** | The LLM that decides which worker to call next |
 | **Artifact** | Versioned output produced by a worker |
 | **Feedback** | Review/critique of an artifact |
+
+## The Magic Decorator
+
+Define workers with just type hints - no boilerplate:
+
+```python
+from blackboard import worker
+from blackboard.state import Blackboard
+
+# Simple function - schema auto-generated
+@worker
+def calculate(a: int, b: int, operation: str = "add") -> str:
+    """Performs math operations."""
+    if operation == "add":
+        return str(a + b)
+    return str(a - b)
+
+# With state access
+@worker
+def summarize(state: Blackboard) -> str:
+    """Summarizes current progress."""
+    return f"Goal: {state.goal}, Artifacts: {len(state.artifacts)}"
+
+# Async support
+@worker
+async def research(topic: str) -> str:
+    """Researches a topic online."""
+    # ... async HTTP calls
+    return f"Research on {topic}"
+```
+
+## Chain-of-Thought Reasoning
+
+Enable smarter decision-making with CoT:
+
+```python
+from blackboard import Orchestrator, BlackboardConfig
+from blackboard.reasoning import ChainOfThoughtStrategy
+
+# Enable Chain-of-Thought via config
+config = BlackboardConfig(reasoning_strategy="cot")
+orchestrator = Orchestrator(llm=llm, workers=workers, config=config)
+
+# Or use the strategy directly
+from blackboard.reasoning import ChainOfThoughtStrategy
+
+strategy = ChainOfThoughtStrategy()
+# The LLM will now output <thinking>...</thinking> before deciding
+```
+
+## State Persistence
+
+Save and resume sessions reliably:
+
+```python
+# Save session
+result.save_to_json("session.json")
+
+# Resume later - state is preserved exactly
+state = Blackboard.load_from_json("session.json")
+result = await orchestrator.run(state=state)
+```
 
 ## Advanced Features
 
@@ -122,15 +180,62 @@ memory = SimpleVectorMemory(embedder=OpenAIEmbedder())
 worker = MemoryWorker(memory=memory)
 ```
 
-### Persistence
+### Model Context Protocol
 
 ```python
-# Save session
-result.save_to_json("session.json")
+from blackboard.mcp import MCPServerWorker
 
-# Resume later
-state = Blackboard.load_from_json("session.json")
-await orchestrator.run(state=state)
+# Local via stdio
+fs_server = await MCPServerWorker.create(
+    name="Filesystem",
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-fs", "/tmp"]
+)
+
+# Remote via SSE
+remote = await MCPServerWorker.create(
+    name="RemoteAPI",
+    url="http://mcp-server:8080/sse"
+)
+
+# Each MCP tool becomes a worker
+workers = fs_server.expand_to_workers()
+```
+
+### Blueprints (Workflow Patterns)
+
+```python
+from blackboard.flow import SequentialPipeline, Router
+
+# Force A → B → C execution
+pipeline = SequentialPipeline([Searcher(), Writer(), Critic()])
+
+# Let supervisor choose best worker
+router = Router([MathAgent(), CodeAgent(), ResearchAgent()])
+
+result = await orchestrator.run(goal="...", blueprint=pipeline)
+```
+
+## Configuration
+
+Use environment variables or direct config:
+
+```bash
+export BLACKBOARD_MAX_STEPS=50
+export BLACKBOARD_REASONING_STRATEGY=cot
+export BLACKBOARD_VERBOSE=true
+```
+
+```python
+from blackboard import BlackboardConfig
+
+config = BlackboardConfig.from_env()
+# Or direct:
+config = BlackboardConfig(
+    max_steps=50,
+    reasoning_strategy="cot",
+    enable_parallel=True
+)
 ```
 
 ## Documentation
