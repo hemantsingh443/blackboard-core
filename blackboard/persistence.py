@@ -47,13 +47,14 @@ class PersistenceLayer(Protocol):
         state = await persistence.load(session_id="user-123")
     """
     
-    async def save(self, state: "Blackboard", session_id: str) -> None:
+    async def save(self, state: "Blackboard", session_id: str, parent_session_id: Optional[str] = None) -> None:
         """
         Save state to the backend.
         
         Args:
             state: Blackboard state to persist
             session_id: Unique identifier for this session
+            parent_session_id: Optional parent session ID for fractal agents (v1.6+)
             
         Raises:
             SessionConflictError: If version conflict detected
@@ -125,8 +126,9 @@ class JSONFilePersistence:
         safe_id = "".join(c for c in session_id if c.isalnum() or c in "-_")
         return self.directory / f"{safe_id}.json"
     
-    async def save(self, state: "Blackboard", session_id: str) -> None:
+    async def save(self, state: "Blackboard", session_id: str, parent_session_id: Optional[str] = None) -> None:
         from .state import Blackboard
+        # Note: parent_session_id is ignored in JSONFilePersistence (no hierarchy tracking)
         
         path = self._get_path(session_id)
         
@@ -588,8 +590,9 @@ class RedisPersistence:
     def _key(self, session_id: str) -> str:
         return f"{self.prefix}{session_id}"
     
-    async def save(self, state: "Blackboard", session_id: str) -> None:
+    async def save(self, state: "Blackboard", session_id: str, parent_session_id: Optional[str] = None) -> None:
         client = await self._get_client()
+        # Note: parent_session_id is ignored in RedisPersistence (no hierarchy tracking)
         key = self._key(session_id)
         
         # Optimistic locking with WATCH
@@ -670,7 +673,7 @@ class InMemoryPersistence:
     def __init__(self):
         self._store: dict = {}
     
-    async def save(self, state: "Blackboard", session_id: str) -> None:
+    async def save(self, state: "Blackboard", session_id: str, parent_session_id: Optional[str] = None) -> None:
         from .state import Blackboard
         
         if session_id in self._store:
@@ -682,6 +685,7 @@ class InMemoryPersistence:
         
         state.version += 1
         self._store[session_id] = state.model_dump_json()
+        # Note: parent_session_id is ignored in InMemoryPersistence (no hierarchy tracking)
     
     async def load(self, session_id: str) -> "Blackboard":
         from .state import Blackboard
