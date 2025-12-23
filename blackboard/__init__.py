@@ -55,7 +55,16 @@ from .decorators import (
     critic,
 )
 
-__version__ = "1.5.4"
+# Squad Patterns
+from .patterns import (
+    create_squad,
+    research_squad,
+    code_squad,
+    memory_squad,
+    Squad,
+)
+
+__version__ = "1.6.0"
 
 __all__ = [
     # State
@@ -95,6 +104,12 @@ __all__ = [
     "Runtime",
     "ExecutionResult",
     "RuntimeSecurityError",
+    # Squad Patterns
+    "create_squad",
+    "research_squad",
+    "code_squad",
+    "memory_squad",
+    "Squad",
     # Version
     "__version__",
 ]
