@@ -151,6 +151,10 @@ class TestHistoryManagement:
 # SQLitePersistence Tests
 # =============================================================================
 
+# Skip all SQLite tests if aiosqlite is not installed (optional dependency)
+aiosqlite = pytest.importorskip("aiosqlite", reason="aiosqlite required for SQLite tests")
+
+
 class TestSQLitePersistence:
     """Tests for SQLitePersistence backend."""
     
