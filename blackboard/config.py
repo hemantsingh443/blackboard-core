@@ -46,6 +46,7 @@ class BlackboardConfig:
     max_steps: int = 20
     max_history: int = 1000
     token_budget: int = 100000
+    max_recursion_depth: int = 3  # For fractal agent nesting
     
     # Safety flags
     allow_unsafe_execution: bool = False
@@ -118,6 +119,7 @@ class BlackboardConfig:
             "max_steps": get_int("max_steps", 20),
             "max_history": get_int("max_history", 1000),
             "token_budget": get_int("token_budget", 100000),
+            "max_recursion_depth": get_int("max_recursion_depth", 3),
             "allow_unsafe_execution": get_bool("allow_unsafe_execution", False),
             "simple_prompts": get_bool("simple_prompts", False),
             "use_tool_calling": get_bool("use_tool_calling", True),
@@ -136,11 +138,12 @@ class BlackboardConfig:
         return cls(**env_config)
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert config to dictionary."""
+        """Convert config to dictionary for serialization."""
         return {
             "max_steps": self.max_steps,
             "max_history": self.max_history,
             "token_budget": self.token_budget,
+            "max_recursion_depth": self.max_recursion_depth,
             "allow_unsafe_execution": self.allow_unsafe_execution,
             "simple_prompts": self.simple_prompts,
             "use_tool_calling": self.use_tool_calling,
@@ -153,6 +156,38 @@ class BlackboardConfig:
             "verbose": self.verbose,
             "summarize_thresholds": self.summarize_thresholds,
         }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "BlackboardConfig":
+        """
+        Create config from dictionary.
+        
+        Used for propagating config to sub-agents in fractal architectures.
+        
+        Args:
+            data: Dictionary with config values
+            
+        Returns:
+            BlackboardConfig instance
+        """
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+    
+    def for_child_agent(self, depth_decrement: int = 1) -> "BlackboardConfig":
+        """
+        Create a child config with decremented recursion depth.
+        
+        Used when spawning sub-agents in fractal architectures.
+        Inherits all settings including allow_unsafe_execution.
+        
+        Args:
+            depth_decrement: How much to decrement recursion depth
+            
+        Returns:
+            New config for child agent
+        """
+        child_data = self.to_dict()
+        child_data["max_recursion_depth"] = max(0, self.max_recursion_depth - depth_decrement)
+        return self.from_dict(child_data)
 
 
 # Default configuration instance

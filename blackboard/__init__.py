@@ -38,13 +38,22 @@ from .persistence import (
     SessionNotFoundError,
 )
 
+# Runtime
+from .runtime import (
+    LocalRuntime,
+    DockerRuntime,
+    Runtime,
+    ExecutionResult,
+    RuntimeSecurityError,
+)
+
 # Decorators
 from .decorators import (
     worker,
     critic,
 )
 
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
 __all__ = [
     # State
@@ -75,6 +84,12 @@ __all__ = [
     "InMemoryPersistence",
     "PersistenceError",
     "SessionNotFoundError",
+    # Runtime
+    "LocalRuntime",
+    "DockerRuntime",
+    "Runtime",
+    "ExecutionResult",
+    "RuntimeSecurityError",
     # Version
     "__version__",
 ]
