@@ -36,6 +36,10 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 - **Async-First** - Built for high-performance async/await patterns
 - **Chain-of-Thought** - Pluggable reasoning strategies for smarter decisions
 - **State Idempotence** - Save, load, and resume sessions reliably
+- **Fractal Agents (v1.6)** - Nest agents as workers with recursion limits and trace linking
+- **Squad Patterns (v1.6)** - Pre-configured agent factories for common tasks
+- **SQLite Persistence (v1.6)** - Production-grade storage with parent-child sessions
+- **Runtime Security (v1.6)** - Explicit acknowledgment for unsafe code execution
 - **LiteLLM Integration** - 100+ LLM providers via `LiteLLMClient`
 - **Model Context Protocol** - Connect to MCP servers for external tools
 - **OpenTelemetry** - Distributed tracing with span hierarchy

@@ -13,17 +13,21 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 7. [Tool Calling](#tool-calling)
 8. [Memory System](#memory-system)
 9. [Persistence](#persistence)
-10. [Model Context Protocol (MCP)](#model-context-protocol-mcp)
-11. [Blueprints (Structured Workflows)](#blueprints-structured-workflows)
-12. [Reasoning Strategies](#reasoning-strategies)
-13. [OpenTelemetry](#opentelemetry)
-14. [Session Replay](#session-replay)
-15. [Terminal UI](#terminal-ui)
-16. [Standard Library Workers](#standard-library-workers)
-17. [Blackboard Serve (API Deployment)](#blackboard-serve-api-deployment)
-18. [Events & Observability](#events--observability)
-19. [Error Handling](#error-handling)
-20. [Best Practices](#best-practices)
+10. [Fractal Agent Architecture (v1.6.0)](#fractal-agent-architecture-v160)
+11. [SQLite Persistence (v1.5.1)](#sqlite-persistence-v151)
+12. [Runtime Security (v1.5.2)](#runtime-security-v152)
+13. [Config Propagation](#config-propagation)
+14. [Model Context Protocol (MCP)](#model-context-protocol-mcp)
+15. [Blueprints (Structured Workflows)](#blueprints-structured-workflows)
+16. [Reasoning Strategies](#reasoning-strategies)
+17. [OpenTelemetry](#opentelemetry)
+18. [Session Replay](#session-replay)
+19. [Terminal UI](#terminal-ui)
+20. [Standard Library Workers](#standard-library-workers)
+21. [Blackboard Serve (API Deployment)](#blackboard-serve-api-deployment)
+22. [Events & Observability](#events--observability)
+23. [Error Handling](#error-handling)
+24. [Best Practices](#best-practices)
 
 ---
 
@@ -517,27 +521,209 @@ result = await docker_sandbox.execute(untrusted_code)
 
 ---
 
-## Hierarchical Orchestration (v1.0.1)
+## Fractal Agent Architecture (v1.6.0)
 
-Delegate complex tasks to sub-teams:
+The **Fractal Agent Architecture** enables nested multi-agent systems where Agents can delegate to sub-agents, forming hierarchical teams. This replaces and supersedes the older `hierarchy` module.
+
+> [!IMPORTANT]
+> This is the recommended pattern for complex multi-step tasks. Sub-agents have bounded context (via compression), trace linking for debugging, and security flag propagation.
+
+### Agent Class (Agent-as-Worker)
+
+The `Agent` class implements `Worker`, so it can be used as a worker within a parent orchestrator:
 
 ```python
-from blackboard.hierarchy import SubOrchestratorWorker
+from blackboard import Orchestrator, Agent, BlackboardConfig
 
-research_team = SubOrchestratorWorker(
-    name="ResearchTeam",
-    description="Researches topics using specialists",
-    llm=my_llm,
-    sub_workers=[WebScraper(), Summarizer(), FactChecker()],
-    goal_template="Research: {sub_goal}"
+# Parent config with recursion depth limit
+config = BlackboardConfig(max_recursion_depth=3, max_steps=50)
+
+# Create a sub-agent with its own workers
+research_agent = Agent(
+    name="ResearchAgent",
+    description="Performs web research on a topic",
+    llm=llm,
+    workers=[WebSearchWorker(), BrowserWorker()],
+    config=config.for_child_agent()  # Decrements recursion depth
 )
 
-# Main orchestrator delegates to team
-orchestrator = Orchestrator(
-    llm=my_llm,
-    workers=[Writer(), research_team]
+# Use as a worker in parent orchestrator
+parent = Orchestrator(
+    llm=llm,
+    workers=[research_agent, WriterWorker()],
+    config=config
+)
+
+result = await parent.run(goal="Research and write about AI safety")
+```
+
+### Recursion Depth Limits
+
+The `max_recursion_depth` setting prevents infinite agent loops:
+
+```python
+from blackboard.core import RecursionDepthExceededError
+
+config = BlackboardConfig(max_recursion_depth=2)
+
+# Agents at depth 2 will raise RecursionDepthExceededError
+# if they try to spawn another sub-agent
+```
+
+### Context Compression
+
+Sub-agents automatically compress their execution history before returning to the parent, preventing context window explosion:
+
+```python
+# Instead of full history, parent receives:
+# "Task: Research AI safety
+#  Status: done
+#  Steps taken: 5
+#  Final result: [truncated summary]"
+```
+
+### Trace Linking (Observability)
+
+Each sub-agent run returns a `trace_id` in its `WorkerOutput`, linking to the full session in persistence:
+
+```python
+# WorkerOutput from sub-agent includes:
+output.trace_id  # e.g., "researchagent-abc12345"
+output.has_trace()  # True
+
+# The TUI shows trace links:
+# ✓ ResearchAgent completed [trace: researchagent-abc12345]
+```
+
+### Squad Factory Functions
+
+Pre-configured agent factories for common patterns:
+
+```python
+from blackboard.patterns import research_squad, code_squad, memory_squad
+
+# Web research squad
+researcher = research_squad(llm, config=parent_config.for_child_agent())
+
+# Code execution squad
+coder = code_squad(llm, config=parent_config.for_child_agent())
+
+# Memory management squad
+memory_agent = memory_squad(llm)
+
+# Custom squad
+from blackboard.patterns import create_squad
+custom = create_squad(
+    name="AnalysisTeam",
+    description="Analyzes data and generates reports",
+    llm=llm,
+    workers=[DataLoader(), Analyzer(), ReportWriter()]
 )
 ```
+
+---
+
+## SQLite Persistence (v1.5.1)
+
+Production-grade persistence with parent-child session tracking:
+
+```python
+from blackboard.persistence import SQLitePersistence
+
+persistence = SQLitePersistence("./data/sessions.db")
+await persistence.initialize()
+
+# Save with parent link (for fractal agents)
+await persistence.save(state, "session-123", parent_session_id="parent-001")
+
+# Load
+state = await persistence.load("session-123")
+
+# List child sessions
+children = await persistence.list_sessions(parent_id="parent-001")
+
+# Event logging for debugging
+await persistence.log_event(
+    session_id="session-123",
+    event_type="WORKER_COMPLETED",
+    payload={"worker": "ResearchAgent", "trace_id": "..."},
+    step_index=5
+)
+events = await persistence.get_events("session-123")
+```
+
+### Features
+
+- **WAL Mode**: Concurrent reads/writes
+- **Parent-Child Tracking**: `parent_session_id` for fractal agents
+- **Event Logging**: Full step-by-step replay capability
+- **Shared Connections**: Sub-agents can share DB connection
+- **Optimistic Locking**: Prevents concurrent update conflicts
+
+---
+
+## Runtime Security (v1.5.2)
+
+The `runtime` module provides secure code execution environments:
+
+```python
+from blackboard.runtime import LocalRuntime, DockerRuntime, RuntimeSecurityError
+
+# ⚠️ LocalRuntime requires EXPLICIT acknowledgment
+try:
+    runtime = LocalRuntime()  # Raises RuntimeSecurityError!
+except RuntimeSecurityError as e:
+    print("Security: Must acknowledge unsafe execution")
+
+# Development use (explicit acknowledgment)
+runtime = LocalRuntime(dangerously_allow_execution=True)
+
+# Or via environment variable
+# BLACKBOARD_ALLOW_UNSAFE_EXECUTION=1
+
+# Production: Use Docker
+runtime = DockerRuntime(
+    image="python:3.11-slim",
+    memory_limit="256m",
+    network_disabled=True
+)
+
+result = await runtime.execute("print('hello')")
+print(result.stdout)  # "hello"
+```
+
+### Security Features
+
+- **Explicit Acknowledgment**: `LocalRuntime` requires `dangerously_allow_execution=True`
+- **Env Var Sanitization**: Sensitive keys (API keys, DB URLs) are removed from subprocess
+- **Docker Isolation**: Full container isolation with resource limits
+- **Import Restrictions**: Optional whitelist of allowed imports
+
+---
+
+## Config Propagation
+
+`BlackboardConfig` supports child config creation for fractal agents:
+
+```python
+from blackboard.config import BlackboardConfig
+
+parent = BlackboardConfig(
+    max_recursion_depth=3,
+    max_steps=100,
+    allow_unsafe_execution=True  # Propagates to children
+)
+
+# Create child config with decremented depth
+child = parent.for_child_agent()
+print(child.max_recursion_depth)  # 2
+print(child.allow_unsafe_execution)  # True (inherited)
+
+# Serialize for network transfer
+data = parent.to_dict()
+restored = BlackboardConfig.from_dict(data)
+```
+
 
 ---
 

@@ -1374,9 +1374,8 @@ class Agent(Worker):
             verbose=self.verbose
         )
         
-        # Set up persistence if available
-        if self.persistence and isinstance(self.persistence, SQLitePersistence):
-            orchestrator.set_persistence(self.persistence)
+        # Note: Persistence is handled after run completes (see lines 1388-1396)
+        # The orchestrator does not need persistence set explicitly here
         
         # Run the internal orchestration loop
         try:
