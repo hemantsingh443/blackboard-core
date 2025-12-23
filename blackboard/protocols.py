@@ -43,6 +43,9 @@ class WorkerOutput:
     - Status update: A request to change the blackboard status
     - Any combination of the above
     
+    For fractal agents (Agent-as-Worker):
+    - trace_id: Links to the sub-agent's full session for debugging
+    
     Examples:
         # Generator returning an artifact
         return WorkerOutput(artifact=Artifact(type="text", content="Hello", creator="Writer"))
@@ -52,11 +55,18 @@ class WorkerOutput:
         
         # Worker signaling completion
         return WorkerOutput(status_update=Status.DONE)
+        
+        # Sub-agent returning with trace link
+        return WorkerOutput(
+            artifact=Artifact(type="summary", content="...", creator="ResearchAgent"),
+            trace_id="session-123-abc"  # Link to full sub-agent log
+        )
     """
     artifact: Optional["Artifact"] = None
     feedback: Optional["Feedback"] = None
     status_update: Optional["Status"] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    trace_id: Optional[str] = None  # For fractal agent traceability
 
     def has_artifact(self) -> bool:
         """Check if this output contains an artifact."""
@@ -69,6 +79,10 @@ class WorkerOutput:
     def has_status_update(self) -> bool:
         """Check if this output requests a status update."""
         return self.status_update is not None
+    
+    def has_trace(self) -> bool:
+        """Check if this output has a trace link (from sub-agent)."""
+        return self.trace_id is not None
 
 
 class Worker(ABC):

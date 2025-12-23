@@ -25,6 +25,8 @@ from .core import (
     LLMUsage,
     run_blackboard,
     run_blackboard_sync,
+    Agent,
+    RecursionDepthExceededError,
 )
 
 # Configuration
@@ -53,7 +55,7 @@ from .decorators import (
     critic,
 )
 
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 
 __all__ = [
     # State
@@ -77,6 +79,9 @@ __all__ = [
     "LLMUsage",
     "run_blackboard",
     "run_blackboard_sync",
+    # Fractal Agents
+    "Agent",
+    "RecursionDepthExceededError",
     # Configuration
     "BlackboardConfig",
     # Persistence

@@ -1203,3 +1203,272 @@ def run_blackboard_sync(
 ) -> Blackboard:
     """Convenience function to run the blackboard system (sync). Safe inside existing event loops."""
     return _run_sync(run_blackboard(goal, llm, workers, max_steps, verbose))
+
+
+# =============================================================================
+# Agent: Fractal Agent (Worker that wraps an Orchestrator)
+# =============================================================================
+
+class RecursionDepthExceededError(Exception):
+    """Raised when agent nesting exceeds max_recursion_depth."""
+    pass
+
+
+class Agent(Worker):
+    """
+    A Worker that encapsulates an Orchestrator for fractal agent architectures.
+    
+    Enables "Agent-as-Worker" pattern where complex tasks can be delegated to
+    sub-agents, each with their own workers and orchestration loop.
+    
+    Features:
+    - Recursion depth limiting (prevents infinite agent loops)
+    - Config propagation (security flags passed to children)
+    - Context compression (summarizes execution before returning)
+    - Trace linking (trace_id in output for debugging)
+    - Shared persistence (optional, for DB connection reuse)
+    
+    Args:
+        name: Agent name (used in tool definitions)
+        description: Description for parent orchestrator
+        llm: LLM client for internal orchestration
+        workers: Workers available to this agent
+        config: BlackboardConfig (inherits from parent if not provided)
+        current_depth: Current recursion depth (set by parent)
+        persistence: Optional shared persistence layer
+        
+    Example:
+        # Create a research sub-agent
+        research_agent = Agent(
+            name="ResearchAgent",
+            description="Performs web research on a topic",
+            llm=llm,
+            workers=[WebSearchWorker(), BrowserWorker()],
+            config=parent_config.for_child_agent()
+        )
+        
+        # Use as a worker in parent orchestrator
+        parent_orchestrator = Orchestrator(
+            llm=llm,
+            workers=[research_agent, WriterWorker()],
+            ...
+        )
+    """
+    
+    # Worker protocol attributes
+    name: str = "Agent"
+    description: str = "A sub-agent that can perform complex multi-step tasks"
+    input_schema = None  # Uses default WorkerInput
+    parallel_safe: bool = False  # Sub-agents are stateful
+    
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        llm: LLMClient,
+        workers: List[Worker],
+        config: Optional["BlackboardConfig"] = None,
+        current_depth: int = 0,
+        persistence: Optional[Any] = None,  # SQLitePersistence
+        event_bus: Optional[EventBus] = None,
+        parent_event_bus: Optional[EventBus] = None,
+        verbose: bool = False
+    ):
+        from .config import BlackboardConfig
+        
+        self.name = name
+        self.description = description
+        self.llm = llm
+        self.workers = workers
+        self.config = config or BlackboardConfig()
+        self.current_depth = current_depth
+        self.persistence = persistence
+        self.parent_event_bus = parent_event_bus
+        self.verbose = verbose
+        
+        # Create internal event bus
+        self._event_bus = event_bus or EventBus()
+        
+        # Set up event bubbling if parent bus exists
+        if self.parent_event_bus:
+            self._setup_event_bubbling()
+    
+    def _setup_event_bubbling(self) -> None:
+        """Subscribe to internal events and republish to parent with namespacing."""
+        from copy import copy
+        
+        async def bubble_event(event: Event) -> None:
+            # Clone the event to avoid mutation
+            bubbled = copy(event)
+            
+            # Namespace the source
+            original_source = bubbled.data.get("source", "System")
+            bubbled.data["source"] = f"{self.name}:{original_source}"
+            bubbled.data["depth"] = self.current_depth
+            bubbled.data["agent_name"] = self.name
+            
+            # Publish to parent
+            await self.parent_event_bus.publish_async(bubbled)
+        
+        # Subscribe to all event types
+        for event_type in EventType:
+            self._event_bus.subscribe(event_type, bubble_event)
+    
+    async def run(
+        self,
+        state: "Blackboard",
+        inputs: Optional[WorkerInput] = None
+    ) -> WorkerOutput:
+        """
+        Execute the agent's internal orchestration loop.
+        
+        Args:
+            state: Parent's blackboard state (for context)
+            inputs: Instructions containing the goal for this agent
+            
+        Returns:
+            WorkerOutput with summarized result and trace_id
+        """
+        from .config import BlackboardConfig
+        from .persistence import SQLitePersistence
+        import uuid
+        
+        # Extract goal from inputs
+        goal = inputs.instructions if inputs else "Complete the delegated task"
+        
+        # Check recursion depth
+        if self.current_depth >= self.config.max_recursion_depth:
+            raise RecursionDepthExceededError(
+                f"Agent '{self.name}' exceeded max recursion depth of "
+                f"{self.config.max_recursion_depth}. Current depth: {self.current_depth}"
+            )
+        
+        # Generate session ID for this agent run
+        session_id = f"{self.name.lower().replace(' ', '-')}-{uuid.uuid4().hex[:8]}"
+        
+        # Create child config with decremented depth
+        child_config = self.config.for_child_agent()
+        
+        # Create internal orchestrator
+        orchestrator = Orchestrator(
+            llm=self.llm,
+            workers=self.workers,
+            config=child_config,
+            event_bus=self._event_bus,
+            verbose=self.verbose
+        )
+        
+        # Set up persistence if available
+        if self.persistence and isinstance(self.persistence, SQLitePersistence):
+            orchestrator.set_persistence(self.persistence)
+        
+        # Run the internal orchestration loop
+        try:
+            result_state = await orchestrator.run(
+                goal=goal,
+                max_steps=child_config.max_steps
+            )
+            
+            # Save final state to persistence with parent link
+            if self.persistence and isinstance(self.persistence, SQLitePersistence):
+                # Get parent session ID from context if available
+                parent_session_id = state.metadata.get("session_id")
+                await self.persistence.save(
+                    result_state, 
+                    session_id,
+                    parent_session_id=parent_session_id
+                )
+            
+            # Context Compression: Summarize the execution
+            summary = await self._compress_context(result_state, goal)
+            
+            # Create artifact with summary
+            artifact = Artifact(
+                type="agent_result",
+                content=summary,
+                creator=self.name,
+                metadata={
+                    "session_id": session_id,
+                    "steps_taken": result_state.step_count,
+                    "final_status": result_state.status.value,
+                    "artifacts_created": len(result_state.artifacts)
+                }
+            )
+            
+            # Return with trace_id for debugging
+            return WorkerOutput(
+                artifact=artifact,
+                status_update=result_state.status if result_state.status == Status.DONE else None,
+                trace_id=session_id,
+                metadata={
+                    "agent_name": self.name,
+                    "depth": self.current_depth,
+                    "steps": result_state.step_count
+                }
+            )
+            
+        except RecursionDepthExceededError:
+            raise
+        except Exception as e:
+            logger.error(f"Agent '{self.name}' failed: {e}")
+            return WorkerOutput(
+                feedback=Feedback(
+                    source=self.name,
+                    critique=f"Agent execution failed: {str(e)}",
+                    passed=False
+                ),
+                trace_id=session_id,
+                metadata={"error": str(e)}
+            )
+    
+    async def _compress_context(self, state: "Blackboard", original_goal: str) -> str:
+        """
+        Compress the agent's execution history into a summary.
+        
+        This prevents context window explosion when returning to parent.
+        """
+        # If only a few steps, just return the last artifact
+        if state.step_count <= 3 and state.artifacts:
+            last_artifact = state.get_latest_artifact()
+            if last_artifact:
+                return f"Result: {last_artifact.content}"
+        
+        # For longer executions, create a summary
+        summary_parts = [
+            f"Task: {original_goal}",
+            f"Status: {state.status.value}",
+            f"Steps taken: {state.step_count}",
+        ]
+        
+        # Add artifacts summary
+        if state.artifacts:
+            summary_parts.append(f"Artifacts created: {len(state.artifacts)}")
+            # Include content of latest artifact (truncated)
+            latest = state.get_latest_artifact()
+            if latest:
+                content_preview = str(latest.content)[:500]
+                if len(str(latest.content)) > 500:
+                    content_preview += "..."
+                summary_parts.append(f"Final result:\n{content_preview}")
+        
+        # Add feedback summary
+        passed_feedback = [f for f in state.feedback if f.passed]
+        failed_feedback = [f for f in state.feedback if not f.passed]
+        if failed_feedback:
+            summary_parts.append(f"Issues encountered: {len(failed_feedback)}")
+        
+        return "\n".join(summary_parts)
+    
+    def get_schema_json(self) -> Optional[Dict[str, Any]]:
+        """Return JSON schema for agent inputs."""
+        return {
+            "type": "object",
+            "properties": {
+                "instructions": {
+                    "type": "string",
+                    "description": f"The goal or task for {self.name} to accomplish"
+                }
+            },
+            "required": ["instructions"]
+        }
+
