@@ -132,7 +132,14 @@ class BlackboardTUI:
     def _on_worker_completed(self, event) -> None:
         """Handle worker completed event."""
         worker_name = event.data.get("worker", self._current_worker or "Worker")
-        self._add_activity(f"✓ {worker_name} completed")
+        
+        # Check if this was a sub-agent with trace link
+        if event.data.get("is_sub_agent"):
+            trace_id = event.data.get("trace_id", "")
+            self._add_activity(f"✓ {worker_name} completed [trace: {trace_id}]")
+        else:
+            self._add_activity(f"✓ {worker_name} completed")
+        
         self._current_worker = None
         if "state" in event.data:
             self._current_state = event.data["state"]

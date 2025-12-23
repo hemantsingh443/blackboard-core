@@ -621,12 +621,20 @@ class Orchestrator:
         try:
             output = await retry_with_backoff(execute, policy=self.retry_policy)
             
-            await self._publish_event(EventType.WORKER_COMPLETED, {
+            # Build event data with optional trace_id
+            completed_event_data = {
                 "worker": worker.name,
                 "has_artifact": output.has_artifact(),
                 "has_feedback": output.has_feedback(),
                 "parallel": True
-            })
+            }
+            
+            # Add trace_id if this was a sub-agent (fractal agent support)
+            if output.has_trace():
+                completed_event_data["trace_id"] = output.trace_id
+                completed_event_data["is_sub_agent"] = True
+            
+            await self._publish_event(EventType.WORKER_COMPLETED, completed_event_data)
             
             return output
             
@@ -721,11 +729,19 @@ class Orchestrator:
             
             self._apply_worker_output(state, final_output, worker.name)
             
-            await self._publish_event(EventType.WORKER_COMPLETED, {
+            # Build event data with optional trace_id
+            completed_event_data = {
                 "worker": worker.name,
                 "has_artifact": final_output.has_artifact(),
                 "has_feedback": final_output.has_feedback()
-            })
+            }
+            
+            # Add trace_id if this was a sub-agent (fractal agent support)
+            if final_output.has_trace():
+                completed_event_data["trace_id"] = final_output.trace_id
+                completed_event_data["is_sub_agent"] = True
+            
+            await self._publish_event(EventType.WORKER_COMPLETED, completed_event_data)
             
             if final_output.has_artifact():
                 logger.debug(f"Artifact: {final_output.artifact.type}")
