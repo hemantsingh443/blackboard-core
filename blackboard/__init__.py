@@ -30,13 +30,21 @@ from .core import (
 # Configuration
 from .config import BlackboardConfig
 
+# Persistence
+from .persistence import (
+    SQLitePersistence,
+    InMemoryPersistence,
+    PersistenceError,
+    SessionNotFoundError,
+)
+
 # Decorators
 from .decorators import (
     worker,
     critic,
 )
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 __all__ = [
     # State
@@ -62,6 +70,11 @@ __all__ = [
     "run_blackboard_sync",
     # Configuration
     "BlackboardConfig",
+    # Persistence
+    "SQLitePersistence",
+    "InMemoryPersistence",
+    "PersistenceError",
+    "SessionNotFoundError",
     # Version
     "__version__",
 ]

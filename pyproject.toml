@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackboard-core"
-version = "1.5.0"
+version = "1.5.1"
 description = "A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -46,6 +46,9 @@ chroma = [
 hybrid = [
     "rank-bm25>=0.2.2",
 ]
+sqlite = [
+    "aiosqlite>=0.19.0",
+]
 tui = [
     "rich>=13.0.0",
 ]
@@ -61,6 +64,7 @@ all = [
     "redis>=5.0.0",
     "chromadb>=0.4.0",
     "rank-bm25>=0.2.2",
+    "aiosqlite>=0.19.0",
     "rich>=13.0.0",
     "mcp[cli]>=1.0.0",
     "networkx>=3.0.0",

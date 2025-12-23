@@ -145,3 +145,265 @@ class TestHistoryManagement:
         assert "Steps: 10" in summary
         assert "Artifacts: 1" in summary
         assert "Passed" in summary
+
+
+# =============================================================================
+# SQLitePersistence Tests
+# =============================================================================
+
+class TestSQLitePersistence:
+    """Tests for SQLitePersistence backend."""
+    
+    @pytest.fixture
+    def db_path(self, tmp_path):
+        """Create a temporary database path."""
+        return str(tmp_path / "test.db")
+    
+    @pytest.mark.asyncio
+    async def test_initialize_creates_tables(self, db_path):
+        """Test that initialize creates the schema."""
+        from blackboard.persistence import SQLitePersistence
+        
+        persistence = SQLitePersistence(db_path)
+        await persistence.initialize()
+        
+        # Check tables exist
+        conn = await persistence._get_connection()
+        cursor = await conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        )
+        tables = [row[0] for row in await cursor.fetchall()]
+        
+        assert "sessions" in tables
+        assert "events" in tables
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_save_and_load(self, db_path):
+        """Test basic save and load functionality."""
+        from blackboard.persistence import SQLitePersistence
+        
+        persistence = SQLitePersistence(db_path)
+        
+        state = Blackboard(goal="Test goal")
+        state.add_artifact(Artifact(type="text", content="Hello", creator="Test"))
+        
+        await persistence.save(state, "session-001")
+        loaded = await persistence.load("session-001")
+        
+        assert loaded.goal == "Test goal"
+        assert len(loaded.artifacts) == 1
+        assert loaded.artifacts[0].content == "Hello"
+        assert loaded.version == 2  # Version starts at 1, incremented to 2 on save
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_version_conflict(self, db_path):
+        """Test that version conflicts are detected."""
+        from blackboard.persistence import SQLitePersistence, SessionConflictError
+        
+        persistence = SQLitePersistence(db_path)
+        
+        # Save initial state
+        state1 = Blackboard(goal="Original")
+        await persistence.save(state1, "session-001")
+        
+        # Load and modify
+        state2 = await persistence.load("session-001")
+        state2.goal = "Modified by worker 1"
+        
+        # Load again (simulating concurrent access)
+        state3 = await persistence.load("session-001")
+        state3.goal = "Modified by worker 2"
+        
+        # Save state2 first (increments version to 2)
+        await persistence.save(state2, "session-001")
+        
+        # Now state3 has version 1 but DB has version 2 -> conflict
+        with pytest.raises(SessionConflictError):
+            await persistence.save(state3, "session-001")
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_exists_and_delete(self, db_path):
+        """Test exists and delete operations."""
+        from blackboard.persistence import SQLitePersistence
+        
+        persistence = SQLitePersistence(db_path)
+        
+        state = Blackboard(goal="Test")
+        await persistence.save(state, "session-001")
+        
+        assert await persistence.exists("session-001") is True
+        assert await persistence.exists("nonexistent") is False
+        
+        await persistence.delete("session-001")
+        assert await persistence.exists("session-001") is False
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_list_sessions(self, db_path):
+        """Test listing sessions."""
+        from blackboard.persistence import SQLitePersistence
+        
+        persistence = SQLitePersistence(db_path)
+        
+        await persistence.save(Blackboard(goal="A"), "session-a")
+        await persistence.save(Blackboard(goal="B"), "session-b")
+        await persistence.save(Blackboard(goal="C"), "session-c")
+        
+        sessions = await persistence.list_sessions()
+        
+        assert len(sessions) == 3
+        assert "session-a" in sessions
+        assert "session-b" in sessions
+        assert "session-c" in sessions
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_parent_session_tracking(self, db_path):
+        """Test parent-child session relationships."""
+        from blackboard.persistence import SQLitePersistence
+        
+        persistence = SQLitePersistence(db_path)
+        
+        # Create parent session
+        parent_state = Blackboard(goal="Parent task")
+        await persistence.save(parent_state, "parent-001")
+        
+        # Create child sessions
+        child1 = Blackboard(goal="Child 1")
+        child2 = Blackboard(goal="Child 2")
+        await persistence.save(child1, "child-001", parent_session_id="parent-001")
+        await persistence.save(child2, "child-002", parent_session_id="parent-001")
+        
+        # List children of parent
+        children = await persistence.list_sessions(parent_id="parent-001")
+        
+        assert len(children) == 2
+        assert "child-001" in children
+        assert "child-002" in children
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_event_logging(self, db_path):
+        """Test event logging functionality."""
+        from blackboard.persistence import SQLitePersistence
+        
+        persistence = SQLitePersistence(db_path)
+        
+        # Create session
+        state = Blackboard(goal="Test")
+        await persistence.save(state, "session-001")
+        
+        # Log events
+        event1_id = await persistence.log_event(
+            session_id="session-001",
+            event_type="worker_called",
+            source="Orchestrator",
+            step_index=1,
+            payload={"worker": "Writer", "inputs": {"task": "Generate text"}}
+        )
+        
+        event2_id = await persistence.log_event(
+            session_id="session-001",
+            event_type="worker_completed",
+            source="Writer",
+            step_index=1,
+            parent_event_id=event1_id,
+            payload={"result": "Hello, world!"}
+        )
+        
+        # Retrieve events
+        events = await persistence.get_events("session-001")
+        
+        assert len(events) == 2
+        assert events[0]["event_type"] == "worker_called"
+        assert events[0]["step_index"] == 1
+        assert events[1]["parent_event_id"] == event1_id
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_event_filtering(self, db_path):
+        """Test filtering events by type."""
+        from blackboard.persistence import SQLitePersistence
+        
+        persistence = SQLitePersistence(db_path)
+        
+        state = Blackboard(goal="Test")
+        await persistence.save(state, "session-001")
+        
+        # Log mixed events
+        await persistence.log_event("session-001", "step_started", payload={"step": 1})
+        await persistence.log_event("session-001", "worker_called", payload={"worker": "A"})
+        await persistence.log_event("session-001", "step_started", payload={"step": 2})
+        await persistence.log_event("session-001", "worker_called", payload={"worker": "B"})
+        
+        # Filter by type
+        step_events = await persistence.get_events("session-001", event_type="step_started")
+        worker_events = await persistence.get_events("session-001", event_type="worker_called")
+        
+        assert len(step_events) == 2
+        assert len(worker_events) == 2
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_shared_connection(self, db_path):
+        """Test shared connection between parent and child persistence."""
+        from blackboard.persistence import SQLitePersistence
+        
+        parent_persistence = SQLitePersistence(db_path)
+        await parent_persistence.initialize()
+        
+        # Child shares connection
+        child_persistence = SQLitePersistence(shared_connection=parent_persistence)
+        
+        # Both should work with same connection
+        await parent_persistence.save(Blackboard(goal="Parent"), "parent")
+        await child_persistence.save(Blackboard(goal="Child"), "child")
+        
+        # Verify both sessions exist
+        assert await parent_persistence.exists("parent")
+        assert await parent_persistence.exists("child")
+        assert await child_persistence.exists("parent")
+        assert await child_persistence.exists("child")
+        
+        # Only close parent (child shares connection)
+        await parent_persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_session_not_found(self, db_path):
+        """Test SessionNotFoundError is raised for missing sessions."""
+        from blackboard.persistence import SQLitePersistence, SessionNotFoundError
+        
+        persistence = SQLitePersistence(db_path)
+        
+        with pytest.raises(SessionNotFoundError):
+            await persistence.load("nonexistent")
+        
+        await persistence.close()
+    
+    @pytest.mark.asyncio
+    async def test_wal_mode_enabled(self, db_path):
+        """Test that WAL mode is enabled for concurrency."""
+        from blackboard.persistence import SQLitePersistence
+        
+        persistence = SQLitePersistence(db_path)
+        await persistence.initialize()
+        
+        conn = await persistence._get_connection()
+        cursor = await conn.execute("PRAGMA journal_mode")
+        row = await cursor.fetchone()
+        
+        assert row[0].lower() == "wal"
+        
+        await persistence.close()
+
