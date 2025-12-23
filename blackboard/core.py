@@ -335,6 +335,31 @@ class Orchestrator:
         else:
             logger.warning(f"Force quit requested. Exiting immediately.")
             sys.exit(1)
+    
+    def set_persistence(self, persistence: Any) -> None:
+        """
+        Set persistence layer for step-by-step state saving.
+        
+        When set, the orchestrator will save state to the persistence layer
+        after each step (in addition to any JSON auto_save_path).
+        
+        The state.metadata["session_id"] is used as the session identifier.
+        If not set, a default ID will be used.
+        
+        Args:
+            persistence: A persistence layer (e.g., SQLitePersistence)
+            
+        Example:
+            from blackboard.persistence import SQLitePersistence
+            
+            persistence = SQLitePersistence("./sessions.db")
+            await persistence.initialize()
+            
+            orchestrator.set_persistence(persistence)
+            result = await orchestrator.run(goal="...", state=state)
+            # State is saved after each step
+        """
+        self.persistence = persistence
 
     def _build_tool_definitions(self, workers: List[Worker]) -> List[ToolDefinition]:
         """
@@ -505,6 +530,15 @@ class Orchestrator:
             if self.auto_save_path:
                 state.save_to_json(self.auto_save_path)
                 await self._publish_event(EventType.STATE_SAVED, {"path": self.auto_save_path})
+            
+            # Save to persistence layer if configured (for step-by-step trace recovery)
+            if self.persistence:
+                session_id = state.metadata.get("session_id", "default")
+                parent_session_id = state.metadata.get("parent_session_id")
+                try:
+                    await self.persistence.save(state, session_id, parent_session_id=parent_session_id)
+                except Exception as e:
+                    logger.warning(f"Persistence save failed: {e}")
             
             # Check for graceful shutdown request
             if self._shutdown_requested:
@@ -1365,6 +1399,17 @@ class Agent(Worker):
         # Create child config with decremented depth
         child_config = self.config.for_child_agent()
         
+        # Create initial state with session_id in metadata for persistence tracking
+        initial_state = Blackboard(goal=goal, status=Status.PLANNING)
+        initial_state.metadata["session_id"] = session_id
+        initial_state.metadata["agent_name"] = self.name
+        initial_state.metadata["depth"] = self.current_depth
+        
+        # Link to parent session if available
+        parent_session_id = state.metadata.get("session_id")
+        if parent_session_id:
+            initial_state.metadata["parent_session_id"] = parent_session_id
+        
         # Create internal orchestrator
         orchestrator = Orchestrator(
             llm=self.llm,
@@ -1374,25 +1419,19 @@ class Agent(Worker):
             verbose=self.verbose
         )
         
-        # Note: Persistence is handled after run completes (see lines 1388-1396)
-        # The orchestrator does not need persistence set explicitly here
+        # Set persistence for step-by-step trace recovery
+        if self.persistence:
+            orchestrator.set_persistence(self.persistence)
         
         # Run the internal orchestration loop
         try:
             result_state = await orchestrator.run(
-                goal=goal,
+                state=initial_state,  # Pass initialized state with session_id
                 max_steps=child_config.max_steps
             )
             
-            # Save final state to persistence with parent link
-            if self.persistence and isinstance(self.persistence, SQLitePersistence):
-                # Get parent session ID from context if available
-                parent_session_id = state.metadata.get("session_id")
-                await self.persistence.save(
-                    result_state, 
-                    session_id,
-                    parent_session_id=parent_session_id
-                )
+            # Note: State is saved after each step by the orchestrator (if persistence is set)
+            # No additional save needed here - step-by-step saves enable crash recovery
             
             # Context Compression: Summarize the execution
             summary = await self._compress_context(result_state, goal)
