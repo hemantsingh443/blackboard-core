@@ -5,14 +5,16 @@ Provides a clean abstraction for code execution environments.
 This replaces the older sandbox.py module with a simplified interface.
 
 .. versionadded:: 1.5.2
+.. versionchanged:: 1.6.1
+   LocalRuntime renamed to InsecureLocalRuntime for explicit risk naming.
 
 Example:
-    from blackboard.runtime import LocalRuntime, DockerRuntime
+    from blackboard.runtime import InsecureLocalRuntime, DockerRuntime
     
     # For development (UNSAFE - requires explicit acknowledgment)
-    runtime = LocalRuntime(dangerously_allow_execution=True)
+    runtime = InsecureLocalRuntime(dangerously_allow_execution=True)
     
-    # For production
+    # For production (recommended)
     runtime = DockerRuntime(image="python:3.11-slim")
     
     result = await runtime.execute("print('hello')")
@@ -106,7 +108,7 @@ class Runtime(Protocol):
 # Local Runtime (Development Only)
 # =============================================================================
 
-class LocalRuntime:
+class InsecureLocalRuntime:
     """
     Local subprocess runtime for code execution.
     
@@ -156,7 +158,7 @@ class LocalRuntime:
         self.python_path = python_path or sys.executable
         self.allowed_imports = allowed_imports
         
-        logger.debug("LocalRuntime initialized (unsafe execution acknowledged)")
+        logger.debug("InsecureLocalRuntime initialized (unsafe execution acknowledged)")
     
     async def execute(
         self,
@@ -366,7 +368,8 @@ class DockerRuntime:
 # =============================================================================
 
 # Deprecated aliases for migration
-InsecureLocalExecutor = LocalRuntime
+LocalRuntime = InsecureLocalRuntime  # Deprecated: Use InsecureLocalRuntime
+InsecureLocalExecutor = InsecureLocalRuntime
 DockerSandbox = DockerRuntime
 SandboxResult = ExecutionResult
 SandboxError = RuntimeError

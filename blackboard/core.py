@@ -269,6 +269,8 @@ class Orchestrator:
         self._custom_supervisor_prompt = supervisor_prompt
         
         self.persistence = None  # Set via set_persistence()
+        self._heartbeat_task = None  # Background heartbeat for zombie detection
+        self._heartbeat_interval = 30  # seconds between heartbeat pulses
         
         # Graceful shutdown support
         self._shutdown_requested = False
@@ -360,6 +362,101 @@ class Orchestrator:
             # State is saved after each step
         """
         self.persistence = persistence
+    
+    async def _start_heartbeat(self, session_id: str) -> None:
+        """
+        Start background heartbeat pulse for zombie detection.
+        
+        Updates the heartbeat_at timestamp in persistence every N seconds
+        while the orchestrator is running. This allows external systems to
+        detect "zombie" sessions that appear running but have crashed.
+        """
+        if not self.persistence or not hasattr(self.persistence, 'update_heartbeat'):
+            return  # Persistence doesn't support heartbeats
+        
+        async def pulse():
+            while True:
+                try:
+                    await asyncio.sleep(self._heartbeat_interval)
+                    await self.persistence.update_heartbeat(session_id)
+                    logger.debug(f"Heartbeat sent for session {session_id}")
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.warning(f"Heartbeat failed: {e}")
+        
+        self._heartbeat_task = asyncio.create_task(pulse())
+    
+    async def _stop_heartbeat(self) -> None:
+        """Stop the heartbeat background task."""
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
+    
+    @classmethod
+    async def recover_session(
+        cls,
+        persistence,
+        session_id: str,
+        llm,
+        workers: list
+    ) -> "Blackboard":
+        """
+        Recover a zombie session from persistence.
+        
+        Loads the session state, marks it with recovery_mode=True, and
+        adds feedback indicating the previous step may have partially executed.
+        
+        Args:
+            persistence: Persistence layer with the crashed session
+            session_id: ID of the zombie session to recover
+            llm: LLM client for the new orchestrator
+            workers: Workers for the new orchestrator
+            
+        Returns:
+            The recovered Blackboard state (in PAUSED status)
+            
+        Example:
+            # Detect zombies
+            zombies = await persistence.find_zombie_sessions()
+            
+            for session_id in zombies:
+                state = await Orchestrator.recover_session(
+                    persistence, session_id, llm, workers
+                )
+                print(f"Recovered {session_id} at step {state.step_count}")
+        
+        Warning:
+            The previous step may have executed side effects (API calls, emails).
+            Check state.metadata['recovery_mode'] before retrying workers.
+        """
+        from .state import Blackboard, Feedback, Status
+        
+        # Load the crashed session
+        state = await persistence.load(session_id)
+        
+        # Mark as recovered
+        state.update_status(Status.PAUSED)
+        state.metadata["recovery_mode"] = True
+        state.metadata["recovered_from_status"] = state.status.value
+        
+        # Add recovery feedback
+        state.add_feedback(Feedback(
+            source="System",
+            critique="Session recovered from crash. Previous step may have partially executed. Check recovery_mode flag before retrying any workers.",
+            passed=False
+        ))
+        
+        # Save the recovered state
+        await persistence.save(state, session_id)
+        
+        logger.warning(f"Session {session_id} recovered from crash at step {state.step_count}")
+        
+        return state
 
     def _build_tool_definitions(self, workers: List[Worker]) -> List[ToolDefinition]:
         """
@@ -433,6 +530,10 @@ class Orchestrator:
         logger.info(f"Goal: {state.goal}")
         logger.info(f"Workers: {list(self.registry.list_workers().keys())}")
         logger.debug("-" * 50)
+        
+        # Start heartbeat pulse for zombie detection (if persistence supports it)
+        session_id = state.metadata.get("session_id", "default")
+        await self._start_heartbeat(session_id)
         
         for step in range(max_steps):
             state.increment_step()
@@ -565,6 +666,9 @@ class Orchestrator:
             "step_count": state.step_count,
             "artifacts_count": len(state.artifacts)
         })
+        
+        # Stop heartbeat when run ends
+        await self._stop_heartbeat()
         
         return state
 

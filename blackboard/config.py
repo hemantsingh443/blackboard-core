@@ -54,7 +54,7 @@ class BlackboardConfig:
     # LLM configuration
     simple_prompts: bool = False
     use_tool_calling: bool = True
-    allow_json_fallback: bool = True
+    allow_json_fallback: bool = False  # v2.0: Secure default - fail clearly if tool calling fails
     strict_tools: bool = False
     reasoning_strategy: str = "oneshot"  # "oneshot" or "cot" (chain-of-thought)
     
@@ -123,7 +123,7 @@ class BlackboardConfig:
             "allow_unsafe_execution": get_bool("allow_unsafe_execution", False),
             "simple_prompts": get_bool("simple_prompts", False),
             "use_tool_calling": get_bool("use_tool_calling", True),
-            "allow_json_fallback": get_bool("allow_json_fallback", True),
+            "allow_json_fallback": get_bool("allow_json_fallback", False),  
             "strict_tools": get_bool("strict_tools", False),
             "reasoning_strategy": get_str("reasoning_strategy", "oneshot"),
             "enable_parallel": get_bool("enable_parallel", True),

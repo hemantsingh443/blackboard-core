@@ -32,17 +32,27 @@ from .core import (
 # Configuration
 from .config import BlackboardConfig
 
-# Persistence
+# Persistence 
 from .persistence import (
+    PersistenceLayer,
     SQLitePersistence,
+    RedisPersistence,
     InMemoryPersistence,
     PersistenceError,
     SessionNotFoundError,
+    SessionConflictError,
 )
+
+# Postgres is optional - requires asyncpg
+try:
+    from .persistence import PostgresPersistence
+except ImportError:
+    PostgresPersistence = None  # type: ignore
 
 # Runtime
 from .runtime import (
-    LocalRuntime,
+    LocalRuntime,  # Deprecated alias
+    InsecureLocalRuntime,
     DockerRuntime,
     Runtime,
     ExecutionResult,
@@ -64,7 +74,7 @@ from .patterns import (
     Squad,
 )
 
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 __all__ = [
     # State
@@ -94,10 +104,14 @@ __all__ = [
     # Configuration
     "BlackboardConfig",
     # Persistence
+    "PersistenceLayer",
     "SQLitePersistence",
+    "RedisPersistence",
+    "PostgresPersistence",
     "InMemoryPersistence",
     "PersistenceError",
     "SessionNotFoundError",
+    "SessionConflictError",
     # Runtime
     "LocalRuntime",
     "DockerRuntime",
