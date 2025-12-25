@@ -179,9 +179,15 @@ def get_model_cost(model: str) -> Tuple[float, float]:
     except (ImportError, Exception) as e:
         logger.debug(f"LiteLLM pricing lookup failed: {e}")
     
-    # 4. Default pricing (try to match prefix)
-    for prefix, pricing in DEFAULT_PRICING.items():
-        if model.startswith(prefix) or model.endswith(prefix):
+    # 4. Default pricing (try to match prefix - longest match wins)
+    sorted_keys = sorted(
+        [k for k in DEFAULT_PRICING.keys() if k != "default"],
+        key=len,
+        reverse=True  # Longest first to avoid "gpt-4" matching before "gpt-4o"
+    )
+    for prefix in sorted_keys:
+        if model.startswith(prefix):
+            pricing = DEFAULT_PRICING[prefix]
             return (pricing.input_per_1k, pricing.output_per_1k)
     
     # 5. Ultimate fallback
@@ -211,7 +217,7 @@ def estimate_cost(
     input_cost = (input_tokens / 1000) * input_per_1k
     output_cost = (output_tokens / 1000) * output_per_1k
     
-    return input_cost + output_cost
+    return round(input_cost + output_cost, 10)  # Round to avoid float precision issues
 
 
 # =============================================================================

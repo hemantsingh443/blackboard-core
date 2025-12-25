@@ -95,7 +95,10 @@ class TraceExporter(Protocol):
 # Redaction Support
 # =============================================================================
 
-# Default: no redaction
+import threading
+
+# Thread-safe redaction callback
+_redaction_lock = threading.Lock()
 _redaction_callback: Optional[Callable[[str], str]] = None
 
 
@@ -105,6 +108,8 @@ def configure_redaction(callback: Callable[[str], str]) -> None:
     
     The callback receives raw text (prompts/completions) and should
     return the text with sensitive data redacted.
+    
+    Thread-safe: can be called from any thread.
     
     Example:
         import re
@@ -119,15 +124,18 @@ def configure_redaction(callback: Callable[[str], str]) -> None:
         configure_redaction(redact_pii)
     """
     global _redaction_callback
-    _redaction_callback = callback
+    with _redaction_lock:
+        _redaction_callback = callback
 
 
 def redact_text(text: Optional[str]) -> Optional[str]:
-    """Apply redaction callback if configured."""
+    """Apply redaction callback if configured. Thread-safe."""
     if text is None:
         return None
-    if _redaction_callback is not None:
-        return _redaction_callback(text)
+    with _redaction_lock:
+        callback = _redaction_callback
+    if callback is not None:
+        return callback(text)
     return text
 
 

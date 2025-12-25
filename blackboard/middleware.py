@@ -9,9 +9,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .state import Blackboard
+    from .state import Blackboard, Status, Feedback
     from .core import SupervisorDecision, WorkerCall
     from .protocols import Worker, WorkerOutput
+
+# Runtime imports (avoid circular - imported at type check time only)
+from .state import Status, Feedback
 
 
 @dataclass
@@ -210,8 +213,7 @@ class BudgetMiddleware(Middleware):
         """
         # Check if we're already over budget
         if self.max_cost_usd and self.total_cost >= self.max_cost_usd:
-            from .state import Status, Feedback
-            from .pricing import BudgetExceededError
+            from .pricing import BudgetExceededError  # Only import error class lazily
             
             ctx.state.update_status(Status.FAILED)
             ctx.state.metadata["failure_reason"] = "Budget exceeded"
@@ -228,7 +230,6 @@ class BudgetMiddleware(Middleware):
             return
         
         if self.max_tokens and self.total_tokens >= self.max_tokens:
-            from .state import Status, Feedback
             
             ctx.state.update_status(Status.FAILED)
             ctx.state.metadata["failure_reason"] = "Token budget exceeded"

@@ -143,4 +143,7 @@ class OrchestratorTestFixture:
         self._id_counter = 0
         if hasattr(self.llm, 'reset'):
             self.llm.reset()
+        # Clear in-memory persistence
+        if hasattr(self.persistence, '_store'):
+            self.persistence._store.clear()
         self.last_result = None
