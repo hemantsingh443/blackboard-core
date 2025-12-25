@@ -153,8 +153,15 @@ class BudgetMiddleware(Middleware):
     """
     Tracks token usage and stops execution when budget is exceeded.
     
+    Implements REACTIVE budget enforcement:
+    - Checks accumulated cost BEFORE each step
+    - If over budget, halts immediately (no further execution)
+    - Integrates with blackboard.pricing for LiteLLM-based cost lookup
+    
     Example:
-        budget = BudgetMiddleware(max_tokens=10000, cost_per_1k=0.01)
+        from blackboard.middleware import BudgetMiddleware
+        
+        budget = BudgetMiddleware(max_cost_usd=1.00)
         orchestrator = Orchestrator(..., middleware=[budget])
     """
     
@@ -163,61 +170,100 @@ class BudgetMiddleware(Middleware):
     def __init__(
         self,
         max_tokens: Optional[int] = None,
-        max_cost: Optional[float] = None,
-        cost_per_1k_input: float = 0.0,
-        cost_per_1k_output: float = 0.0
+        max_cost_usd: Optional[float] = None,
+        custom_pricing: Optional[Dict[str, tuple]] = None
     ):
+        """
+        Initialize budget middleware.
+        
+        Args:
+            max_tokens: Optional hard limit on total tokens
+            max_cost_usd: Optional hard limit on total cost in USD
+            custom_pricing: Optional dict of model -> (input_per_1k, output_per_1k)
+        """
         self.max_tokens = max_tokens
-        self.max_cost = max_cost
-        self.cost_per_1k_input = cost_per_1k_input
-        self.cost_per_1k_output = cost_per_1k_output
+        self.max_cost_usd = max_cost_usd
+        self.custom_pricing = custom_pricing or {}
         
         self.total_tokens = 0
         self.total_cost = 0.0
     
-    async def after_step(self, ctx: StepContext) -> None:
-        """Check budget after each step."""
-        usage = ctx.state.metadata.get("last_usage", {})
+    def _get_model_cost(self, model: str) -> tuple:
+        """Get cost per 1k tokens for a model."""
+        # Check custom overrides first
+        if model in self.custom_pricing:
+            return self.custom_pricing[model]
         
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
+        # Use pricing module
+        try:
+            from .pricing import get_model_cost
+            return get_model_cost(model)
+        except ImportError:
+            return (0.001, 0.002)  # Safe fallback
+    
+    async def before_step(self, ctx: StepContext) -> None:
+        """
+        REACTIVE CHECK: Halt immediately if already over budget.
         
-        self.total_tokens += input_tokens + output_tokens
-        self.total_cost += (
-            (input_tokens / 1000) * self.cost_per_1k_input +
-            (output_tokens / 1000) * self.cost_per_1k_output
-        )
-        
-        # Update metadata
-        ctx.state.metadata["budget"] = {
-            "total_tokens": self.total_tokens,
-            "total_cost": self.total_cost,
-            "remaining_tokens": (self.max_tokens - self.total_tokens) if self.max_tokens else None,
-            "remaining_budget": (self.max_cost - self.total_cost) if self.max_cost else None
-        }
-        
-        # Check limits
-        if self.max_tokens and self.total_tokens > self.max_tokens:
+        This runs BEFORE each step to prevent further execution
+        once budget is exceeded.
+        """
+        # Check if we're already over budget
+        if self.max_cost_usd and self.total_cost >= self.max_cost_usd:
             from .state import Status, Feedback
+            from .pricing import BudgetExceededError
+            
+            ctx.state.update_status(Status.FAILED)
+            ctx.state.metadata["failure_reason"] = "Budget exceeded"
+            ctx.state.metadata["budget"] = {
+                "total_cost": self.total_cost,
+                "max_cost": self.max_cost_usd,
+            }
+            ctx.state.add_feedback(Feedback(
+                source="System:BudgetMiddleware",
+                critique=f"HALTED: Budget exceeded (${self.total_cost:.4f} / ${self.max_cost_usd:.4f}). No further steps allowed.",
+                passed=False
+            ))
+            ctx.skip_step = True
+            return
+        
+        if self.max_tokens and self.total_tokens >= self.max_tokens:
+            from .state import Status, Feedback
+            
             ctx.state.update_status(Status.FAILED)
             ctx.state.metadata["failure_reason"] = "Token budget exceeded"
             ctx.state.add_feedback(Feedback(
                 source="System:BudgetMiddleware",
-                critique="Action blocked: Token budget exceeded. No further actions will be processed.",
+                critique=f"HALTED: Token budget exceeded ({self.total_tokens} / {self.max_tokens}). No further steps allowed.",
                 passed=False
             ))
             ctx.skip_step = True
+    
+    async def after_step(self, ctx: StepContext) -> None:
+        """Update accumulated costs after each step completes."""
+        usage = ctx.state.metadata.get("last_usage", {})
+        model = ctx.state.metadata.get("last_model", "gpt-4o-mini")
         
-        if self.max_cost and self.total_cost > self.max_cost:
-            from .state import Status, Feedback
-            ctx.state.update_status(Status.FAILED)
-            ctx.state.metadata["failure_reason"] = "Cost budget exceeded"
-            ctx.state.add_feedback(Feedback(
-                source="System:BudgetMiddleware",
-                critique="Action blocked: Cost budget exceeded. No further actions will be processed.",
-                passed=False
-            ))
-            ctx.skip_step = True
+        input_tokens = usage.get("input_tokens", 0)
+        output_tokens = usage.get("output_tokens", 0)
+        
+        # Use model-aware pricing
+        input_per_1k, output_per_1k = self._get_model_cost(model)
+        step_cost = (
+            (input_tokens / 1000) * input_per_1k +
+            (output_tokens / 1000) * output_per_1k
+        )
+        
+        self.total_tokens += input_tokens + output_tokens
+        self.total_cost += step_cost
+        
+        # Update metadata for visibility
+        ctx.state.metadata["budget"] = {
+            "total_tokens": self.total_tokens,
+            "total_cost": round(self.total_cost, 6),
+            "remaining_tokens": (self.max_tokens - self.total_tokens) if self.max_tokens else None,
+            "remaining_budget": round(self.max_cost_usd - self.total_cost, 6) if self.max_cost_usd else None
+        }
 
 
 class LoggingMiddleware(Middleware):

@@ -316,14 +316,17 @@ Middleware intercepts the orchestration flow for cross-cutting concerns.
 ```python
 from blackboard.middleware import BudgetMiddleware
 
+# Reactive budget enforcement (v1.6.2)
 budget = BudgetMiddleware(
-    max_tokens=100000,
-    max_cost=5.0,
-    cost_per_1k_input=0.01,
-    cost_per_1k_output=0.03
+    max_cost_usd=5.0,     # Hard limit in USD
+    max_tokens=100000,    # Optional token limit
 )
 
 orchestrator = Orchestrator(llm=llm, workers=workers, middleware=[budget])
+
+# Uses LiteLLM pricing automatically, or configure custom:
+from blackboard import configure_pricing
+configure_pricing({"my-azure-model": (0.02, 0.04)})
 ```
 
 ### Human Approval Middleware

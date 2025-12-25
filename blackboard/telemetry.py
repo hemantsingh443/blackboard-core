@@ -22,7 +22,7 @@ Example:
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Protocol, TYPE_CHECKING, runtime_checkable
 from contextlib import contextmanager
 
 from .middleware import Middleware, StepContext, WorkerContext
@@ -35,12 +35,114 @@ logger = logging.getLogger("blackboard.telemetry")
 
 
 # =============================================================================
+# TraceExporter Protocol (Pluggable Exporters)
+# =============================================================================
+
+@dataclass
+class LLMSpan:
+    """
+    Represents a single LLM call span for export.
+    
+    Contains all information about an LLM invocation in a format
+    suitable for export to any tracing backend.
+    """
+    model: str
+    system: str  # e.g., "openai", "anthropic", "google"
+    input_tokens: int
+    output_tokens: int
+    duration_ms: float
+    cost: float = 0.0
+    
+    # Optional: full prompt/completion (may be redacted)
+    prompt: Optional[str] = None
+    completion: Optional[str] = None
+    
+    # Context IDs for correlation
+    session_id: Optional[str] = None
+    trace_id: Optional[str] = None
+    step_index: Optional[int] = None
+    
+    # Metadata
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    error: Optional[str] = None
+
+
+@runtime_checkable
+class TraceExporter(Protocol):
+    """
+    Protocol for pluggable trace exporters.
+    
+    Implement this to export spans to custom observability backends
+    like LangSmith, Arize Phoenix, or Helicone.
+    
+    Example:
+        class LangSmithExporter:
+            async def export_llm_span(self, span: LLMSpan) -> None:
+                langsmith_client.log_run(
+                    model=span.model,
+                    inputs={"prompt": span.prompt},
+                    outputs={"completion": span.completion},
+                )
+    """
+    
+    async def export_llm_span(self, span: LLMSpan) -> None:
+        """Export an LLM call span."""
+        ...
+
+
+# =============================================================================
+# Redaction Support
+# =============================================================================
+
+# Default: no redaction
+_redaction_callback: Optional[Callable[[str], str]] = None
+
+
+def configure_redaction(callback: Callable[[str], str]) -> None:
+    """
+    Configure a redaction callback for PII scrubbing.
+    
+    The callback receives raw text (prompts/completions) and should
+    return the text with sensitive data redacted.
+    
+    Example:
+        import re
+        
+        def redact_pii(text: str) -> str:
+            # Redact SSNs
+            text = re.sub(r'\\d{3}-\\d{2}-\\d{4}', '[SSN REDACTED]', text)
+            # Redact API keys (AWS, OpenAI, etc.)
+            text = re.sub(r'sk-[a-zA-Z0-9]{48}', '[API_KEY REDACTED]', text)
+            return text
+        
+        configure_redaction(redact_pii)
+    """
+    global _redaction_callback
+    _redaction_callback = callback
+
+
+def redact_text(text: Optional[str]) -> Optional[str]:
+    """Apply redaction callback if configured."""
+    if text is None:
+        return None
+    if _redaction_callback is not None:
+        return _redaction_callback(text)
+    return text
+
+
+# =============================================================================
 # Telemetry Data Classes
 # =============================================================================
 
 @dataclass
 class SpanAttributes:
-    """Standard span attributes for blackboard operations."""
+    """
+    Standard span attributes for blackboard operations.
+    
+    Follows OpenTelemetry Semantic Conventions for GenAI:
+    https://opentelemetry.io/docs/specs/semconv/gen-ai/
+    """
     # Orchestrator attributes
     GOAL = "blackboard.goal"
     SESSION_ID = "blackboard.session_id"
@@ -56,7 +158,19 @@ class SpanAttributes:
     WORKER_INSTRUCTIONS = "blackboard.worker.instructions"
     WORKER_PARALLEL = "blackboard.worker.parallel"
     
-    # LLM attributes
+    # GenAI Semantic Conventions (OTEL standard)
+    GEN_AI_SYSTEM = "gen_ai.system"                     # e.g., "openai", "anthropic"
+    GEN_AI_REQUEST_MODEL = "gen_ai.request.model"       # e.g., "gpt-4o"
+    GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"     # actual model used
+    GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+    GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
+    GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+    GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+    GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
+    GEN_AI_REQUEST_PROMPT = "gen_ai.request.prompt"     # Optional: full prompt (redactable)
+    GEN_AI_RESPONSE_COMPLETION = "gen_ai.response.completion"  # Optional: full response (redactable)
+    
+    # Legacy LLM attributes (kept for backward compat)
     LLM_MODEL = "llm.model"
     LLM_INPUT_TOKENS = "llm.tokens.input"
     LLM_OUTPUT_TOKENS = "llm.tokens.output"

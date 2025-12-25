@@ -74,7 +74,24 @@ from .patterns import (
     Squad,
 )
 
-__version__ = "1.6.1"
+# Logging (v1.6.2)
+from .logging import (
+    get_logger,
+    configure_logging,
+    bind_context,
+    set_session_id,
+    clear_context,
+)
+
+# Pricing (v1.6.2)
+from .pricing import (
+    get_model_cost,
+    estimate_cost,
+    BudgetExceededError,
+    configure_pricing,
+)
+
+__version__ = "1.6.2"
 
 __all__ = [
     # State
@@ -124,6 +141,17 @@ __all__ = [
     "code_squad",
     "memory_squad",
     "Squad",
+    # Logging (v1.6.2)
+    "get_logger",
+    "configure_logging",
+    "bind_context",
+    "set_session_id",
+    "clear_context",
+    # Pricing (v1.6.2)
+    "get_model_cost",
+    "estimate_cost",
+    "BudgetExceededError",
+    "configure_pricing",
     # Version
     "__version__",
 ]

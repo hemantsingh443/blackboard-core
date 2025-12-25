@@ -40,6 +40,9 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 - **Squad Patterns (v1.6)** - Pre-configured agent factories for common tasks
 - **SQLite Persistence (v1.6)** - Production-grade storage with parent-child sessions
 - **Runtime Security (v1.6)** - Explicit acknowledgment for unsafe code execution
+- **Structured Logging (v1.6.2)** - JSON logs with session/trace correlation via structlog
+- **Cost Control (v1.6.2)** - LiteLLM pricing integration and budget circuit breakers
+- **Testing Harness (v1.6.2)** - MockLLMClient and OrchestratorTestFixture
 - **LiteLLM Integration** - 100+ LLM providers via `LiteLLMClient`
 - **Model Context Protocol** - Connect to MCP servers for external tools
 - **OpenTelemetry** - Distributed tracing with span hierarchy
