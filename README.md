@@ -30,31 +30,39 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 
 ## Features
 
+**Core**
 - **Centralized State** - All agents share a typed Pydantic state model
 - **LLM Orchestration** - A supervisor LLM decides which worker runs next
-- **Magic Decorators** - Define workers with simple typed functions (auto-generated schemas)
+- **Magic Decorators** - Define workers with simple typed functions
 - **Async-First** - Built for high-performance async/await patterns
-- **Chain-of-Thought** - Pluggable reasoning strategies for smarter decisions
-- **State Idempotence** - Save, load, and resume sessions reliably
-- **Fractal Agents (v1.6)** - Nest agents as workers with recursion limits and trace linking
-- **Squad Patterns (v1.6)** - Pre-configured agent factories for common tasks
-- **SQLite Persistence (v1.6)** - Production-grade storage with parent-child sessions
-- **Runtime Security (v1.6)** - Explicit acknowledgment for unsafe code execution
-- **Structured Logging (v1.6.2)** - JSON logs with session/trace correlation via structlog
-- **Cost Control (v1.6.2)** - LiteLLM pricing integration and budget circuit breakers
-- **Testing Harness (v1.6.2)** - MockLLMClient and OrchestratorTestFixture
-- **Time-Travel Debugging (v1.6.3)** - Fork sessions at any checkpoint, replay with different prompts
-- **Prompt Registry (v1.6.3)** - Externalized prompts with Jinja2 templates and JSON config
-- **Instruction Optimizer (v1.6.3)** - Auto-analyze failures and generate improved prompts
-- **CLI Scaffolding (v1.6.3)** - `blackboard init` to bootstrap projects
-- **Interactive TUI (v1.7.0)** - Textual-based Mission Control with pause, intervention, and live state
-- **LangChain Adapter (v1.7.0)** - Wrap LangChain tools as Blackboard Workers
-- **LlamaIndex Adapter (v1.7.0)** - Wrap QueryEngines as Workers
-- **FastAPI Dependencies (v1.7.0)** - `get_orchestrator_session()` for easy API integration
-- **LiteLLM Integration** - 100+ LLM providers via `LiteLLMClient`
-- **Model Context Protocol** - Connect to MCP servers for external tools
-- **OpenTelemetry** - Distributed tracing with span hierarchy
-- **Live TUI** - Real-time terminal visualization
+
+**Orchestration**
+- **Chain-of-Thought** - Pluggable reasoning strategies
+- **Fractal Agents** - Nest agents as workers with recursion limits
+- **Squad Patterns** - Pre-configured agent factories
+- **Blueprints** - Constrain execution to specific workflows
+
+**Persistence & Memory**
+- **SQLite/Postgres** - Production-grade persistence
+- **Time-Travel Debugging** - Fork sessions at any checkpoint
+- **Vector Memory** - Semantic search with pluggable embedders
+
+**Developer Experience**
+- **Interactive TUI** - Textual-based Mission Control dashboard
+- **CLI Tools** - Project scaffolding and optimization
+- **Session Replay** - Record and replay for debugging
+
+**Production**
+- **Runtime Security** - Explicit acknowledgment for code execution
+- **Cost Control** - Budget middleware with LiteLLM pricing
+- **OpenTelemetry** - Distributed tracing
+
+**Ecosystem**
+- **LiteLLM Integration** - 100+ LLM providers
+- **LangChain Adapter** - Wrap LangChain tools as Workers
+- **LlamaIndex Adapter** - Wrap QueryEngines as Workers
+- **FastAPI Dependencies** - Easy API integration
+- **Model Context Protocol** - Connect to MCP servers
 
 ## Installation
 
