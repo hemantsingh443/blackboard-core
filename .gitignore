@@ -7,3 +7,12 @@ session.json
 venv
 api_sessions 
 demos
+blackboard.prompts.json
+blackboard.patches.json
+prompts/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.agent/
+brain/
