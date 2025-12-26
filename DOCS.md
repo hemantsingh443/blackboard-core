@@ -1602,6 +1602,81 @@ blackboard optimize review --patches-file blackboard.patches.json
 
 ---
 
+## Interactive TUI (v1.7.0)
+
+A Textual-based Mission Control for real-time debugging:
+
+```python
+from blackboard.ui import create_tui, is_headless
+
+# Check if running in CI
+if not is_headless():
+    app = create_tui(orchestrator)
+    await app.run_async()
+```
+
+### Key Bindings
+
+| Key | Action |
+|-----|--------|
+| `Space` | Pause/Resume execution |
+| `I` | Inject intervention command |
+| `Q` | Quit |
+
+### Features
+- **3-pane dashboard**: Log, Artifacts, State
+- **Pause/Resume**: Stop execution at any point
+- **Intervention**: Inject commands mid-execution
+- **Headless detection**: Auto-detects CI environments
+
+---
+
+## Ecosystem Adapters (v1.7.0)
+
+### LangChain Adapter
+
+```python
+from langchain_community.tools import TavilySearchResults
+from blackboard.integrations.langchain import wrap_tool
+
+# Wrap any LangChain tool
+tool = TavilySearchResults()
+worker = wrap_tool(tool, artifact_type="search_results")
+
+orchestrator = Orchestrator(llm=llm, workers=[worker])
+```
+
+### LlamaIndex Adapter
+
+```python
+from llama_index.core import VectorStoreIndex
+from blackboard.integrations.llamaindex import wrap_query_engine
+
+index = VectorStoreIndex.from_documents(docs)
+engine = index.as_query_engine()
+
+worker = wrap_query_engine(engine, name="DocumentSearch")
+```
+
+### FastAPI Dependency
+
+```python
+from fastapi import FastAPI, Depends
+from blackboard.integrations.fastapi_dep import get_orchestrator_session
+
+app = FastAPI()
+
+@app.post("/run")
+async def run(
+    goal: str,
+    session = Depends(get_orchestrator_session(llm=my_llm, workers=workers))
+):
+    result = await session.run(goal=goal)
+    return {"status": result.status.value}
+```
+
+---
+
 ## Best Practices
 
 1. **Use persistence** for production deployments
@@ -1610,3 +1685,4 @@ blackboard optimize review --patches-file blackboard.patches.json
 4. **Use SQLite** for single-node, PostgreSQL for distributed
 5. **Externalize prompts** for easy iteration without code changes
 6. **Fork sessions** to debug failures without rerunning from scratch
+7. **Use ecosystem adapters** to leverage existing LangChain/LlamaIndex tools

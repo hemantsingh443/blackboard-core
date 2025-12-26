@@ -2,11 +2,11 @@
 
 A Python SDK for building **LLM-powered multi-agent systems** using the Blackboard Pattern.
 
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![PyPI version](https://img.shields.io/pypi/v/blackboard-core.svg)](https://pypi.org/project/blackboard-core/)
 
-![Blackboard TUI Demo](public/demo.gif)
+![Blackboard TUI Demo](public/demo.gif)`
 
 ## What is Blackboard-Core?
 
@@ -47,6 +47,10 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 - **Prompt Registry (v1.6.3)** - Externalized prompts with Jinja2 templates and JSON config
 - **Instruction Optimizer (v1.6.3)** - Auto-analyze failures and generate improved prompts
 - **CLI Scaffolding (v1.6.3)** - `blackboard init` to bootstrap projects
+- **Interactive TUI (v1.7.0)** - Textual-based Mission Control with pause, intervention, and live state
+- **LangChain Adapter (v1.7.0)** - Wrap LangChain tools as Blackboard Workers
+- **LlamaIndex Adapter (v1.7.0)** - Wrap QueryEngines as Workers
+- **FastAPI Dependencies (v1.7.0)** - `get_orchestrator_session()` for easy API integration
 - **LiteLLM Integration** - 100+ LLM providers via `LiteLLMClient`
 - **Model Context Protocol** - Connect to MCP servers for external tools
 - **OpenTelemetry** - Distributed tracing with span hierarchy
