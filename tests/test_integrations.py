@@ -5,10 +5,18 @@ import sys
 import warnings
 from unittest.mock import MagicMock, AsyncMock
 
+# Check if textual is available
+try:
+    import textual
+    HAS_TEXTUAL = True
+except ImportError:
+    HAS_TEXTUAL = False
+
 
 class TestTextualTUI:
     """Tests for Textual-based TUI."""
     
+    @pytest.mark.skipif(not HAS_TEXTUAL, reason="textual not installed")
     def test_import_with_textual(self):
         """Test that TUI imports successfully when textual is installed."""
         from blackboard.ui import BlackboardApp, create_tui, is_headless
@@ -17,6 +25,7 @@ class TestTextualTUI:
         assert create_tui is not None
         assert is_headless is not None
     
+    @pytest.mark.skipif(not HAS_TEXTUAL, reason="textual not installed")
     def test_headless_detection(self):
         """Test headless environment detection."""
         from blackboard.ui import is_headless
@@ -35,6 +44,7 @@ class TestTextualTUI:
         else:
             os.environ.pop("CI", None)
     
+    @pytest.mark.skipif(not HAS_TEXTUAL, reason="textual not installed")
     def test_create_tui_factory(self):
         """Test TUI factory function."""
         from blackboard.ui import create_tui
