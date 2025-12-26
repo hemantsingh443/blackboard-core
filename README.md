@@ -160,11 +160,18 @@ strategy = ChainOfThoughtStrategy()
 Save and resume sessions reliably:
 
 ```python
-# Save session
-result.save_to_json("session.json")
+from blackboard.persistence import SQLitePersistence
 
-# Resume later - state is preserved exactly
-state = Blackboard.load_from_json("session.json")
+# Use SQLite for production (supports concurrent access)
+persistence = SQLitePersistence("./blackboard.db")
+await persistence.initialize()
+orchestrator.set_persistence(persistence)
+
+# Save with ID
+await persistence.save(state, "session-123")
+
+# Resume later
+state = await persistence.load("session-123")
 result = await orchestrator.run(state=state)
 ```
 

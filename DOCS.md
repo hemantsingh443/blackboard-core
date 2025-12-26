@@ -453,59 +453,66 @@ state = Blackboard.load_from_json("session.json")
 await orchestrator.run(state=state)
 ```
 
-### Distributed Persistence (v1.0.1)
+### Production Persistence
+<a id="sqlite-persistence-v151"></a>
 
-For serverless and multi-container deployments:
+For production deployments, use a durable persistence backend.
+
+**Single-Node (Recommended)**: Use `SQLitePersistence` (supports WAL mode).
+**Distributed**: Use `PostgresPersistence` or `RedisPersistence`.
 
 ```python
-from blackboard.persistence import RedisPersistence, JSONFilePersistence
+from blackboard.persistence import SQLitePersistence, PostgresPersistence
 
-# Redis backend (requires: pip install blackboard-core[redis])
-persistence = RedisPersistence(
-    redis_url="redis://localhost:6379",
-    prefix="myapp:",
-    ttl=86400  # Optional: expire after 24 hours
-)
+# Option 1: SQLite (easiest for single node)
+persistence = SQLitePersistence("./blackboard.db")
+await persistence.initialize()
+
+# Option 2: Postgres (for distributed/k8s)
+# persistence = PostgresPersistence("postgresql://user:pass@localhost/db")
+# await persistence.initialize()
 
 # Set on orchestrator
 orchestrator.set_persistence(persistence)
 
-# Save and resume sessions
-await persistence.save(state, "session-123")
+# Save session (supports parent linkage for fractal agents)
+await persistence.save(state, "session-123", parent_session_id="parent-001")
+
+# Load session
 state = await persistence.load("session-123")
 
-# List all sessions
+# List sessions
 sessions = await persistence.list_sessions()
 ```
 
-### Pause/Resume (v1.0.1)
+### Pause/Resume Pattern
 
-Handle long-running tasks with human approval:
+To pause execution (e.g., for human approval), simply save the state and stop the orchestrator. To resume, load the state and call `run()` again.
 
 ```python
-# Pause and save state
-await orchestrator.pause(state, "session-123", reason="Needs approval")
+# Pause: Save state and stop
+await persistence.save(state, "session-123")
+# Stop running (e.g., return from function or exit process)
 
-# Later, resume with user input
-result = await orchestrator.resume(
-    "session-123",
-    user_input={"approved": True}
-)
+# Resume: Load and run
+loaded_state = await persistence.load("session-123")
+result = await orchestrator.run(state=loaded_state)
 ```
 
 ### Optimistic Locking
 
-Prevents data loss from concurrent updates:
+Prevents data loss from concurrent updates. The persistence layer checks the state version.
 
 ```python
-from blackboard import StateConflictError
+from blackboard.persistence import SessionConflictError
 
 try:
-    state.save_to_json("session.json")
-except StateConflictError:
-    # Another process updated the file
-    # Reload and merge changes
-    pass
+    # fails if database has a newer version than 'state'
+    await persistence.save(state, "session-123")
+except SessionConflictError:
+    # Reload to get latest changes
+    latest_state = await persistence.load("session-123")
+    # Merge or retry logic...
 ```
 
 ---
