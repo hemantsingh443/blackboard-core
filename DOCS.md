@@ -22,7 +22,7 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 16. [Reasoning Strategies](#reasoning-strategies)
 17. [OpenTelemetry](#opentelemetry)
 18. [Session Replay](#session-replay)
-19. [Terminal UI](#terminal-ui)
+19. [Interactive TUI (Textual)](#interactive-tui-v170)
 20. [Standard Library Workers](#standard-library-workers)
 21. [Blackboard Serve (API Deployment)](#blackboard-serve-api-deployment)
 22. [Events & Observability](#events--observability)
@@ -31,7 +31,8 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 25. [Prompt Registry (v1.6.3)](#prompt-registry-v163)
 26. [Instruction Optimizer (v1.6.3)](#instruction-optimizer-v163)
 27. [CLI Commands (v1.6.3)](#cli-commands-v163)
-28. [Best Practices](#best-practices)
+28. [Ecosystem Adapters (v1.7.0)](#ecosystem-adapters-v170)
+29. [Best Practices](#best-practices)
 
 ---
 
@@ -43,17 +44,20 @@ pip install blackboard-core
 
 Optional dependencies:
 ```bash
-pip install blackboard-core[redis]   # RedisPersistence
-pip install blackboard-core[chroma]  # ChromaMemory (vector DB)
-pip install blackboard-core[hybrid]  # HybridSearchMemory (BM25)
-pip install blackboard-core[serve]   # FastAPI API server
-pip install blackboard-core[stdlib]  # Standard library workers
-pip install blackboard-core[browser] # BrowserWorker (Playwright)
-pip install blackboard-core[all]     # All optional features
+pip install blackboard-core[redis]      # RedisPersistence
+pip install blackboard-core[chroma]     # ChromaMemory (vector DB)
+pip install blackboard-core[hybrid]     # HybridSearchMemory (BM25)
+pip install blackboard-core[serve]      # FastAPI API server
+pip install blackboard-core[stdlib]     # Standard library workers
+pip install blackboard-core[browser]    # BrowserWorker (Playwright)
+pip install blackboard-core[textual-tui] # Interactive TUI (v1.7.0)
+pip install blackboard-core[langchain]  # LangChain Adapter (v1.7.0)
+pip install blackboard-core[llamaindex] # LlamaIndex Adapter (v1.7.0)
+pip install blackboard-core[all]        # All optional features
 
 # Or install embedders directly:
-pip install sentence-transformers    # For LocalEmbedder
-pip install openai                   # For OpenAI embeddings
+pip install sentence-transformers       # For LocalEmbedder
+pip install openai                      # For OpenAI embeddings
 ```
 
 ---
@@ -950,30 +954,64 @@ print(f"Differences: {diff.differences}")
 
 ---
 
-## Terminal UI
+## Interactive TUI (v1.7.0)
+<a id="interactive-tui-v170"></a>
 
-Real-time terminal visualization with animated progress and markdown rendering (v1.3.0):
+A full-featured **Mission Control** dashboard powered by Textual. It allows you to watch agent execution in real-time, pause at any step, investigate state, and inject commands.
+
+> [!NOTE]
+> The legacy `blackboard.tui` module is deprecated. Please migrate to `blackboard.ui`.
+
+### Usage
 
 ```python
-from blackboard.tui import BlackboardTUI, watch
+from blackboard.ui import create_tui, is_headless
 
-# Option 1: Quick start with watch()
-result = watch(orchestrator, goal="Research and write about AI")
-
-# Option 2: Manual control
-tui = BlackboardTUI(orchestrator.event_bus)
-with tui.live():
-    result = await orchestrator.run(goal="...")
-    tui.print_summary(result)
+async def main():
+    orchestrator = Orchestrator(...)
+    
+    # Auto-detect CI/Headless environments
+    if is_headless():
+        # Fallback to standard logging or simple output
+        await orchestrator.run(goal="...")
+    else:
+        # Launch Interactive TUI
+        app = create_tui(orchestrator)
+        # The TUI drives the orchestrator
+        await app.run_async()
 ```
 
-### TUI Features
+### Key Features & Bindings
 
-- **Activity Log**: Real-time event ticker with timestamps
-- **Animated Spinners**: Visual worker progress indicators
-- **Live Markdown**: Artifacts rendered with proper formatting
-- **Responsive Layout**: Adapts to terminal size automatically
-- **Dynamic Borders**: Colors change based on state (thinking/running/done/failed)
+| Feature | Key | Description |
+|---------|-----|-------------|
+| **Pause/Resume** | `Space` | Pause execution to inspect state. Execution stops at the next step boundary. |
+| **Intervention** | `I` | Open input modal to inject a new command/goal to the supervisor. |
+| **Quit** | `Q` | Gracefully stop the application. |
+| **Navigation** | `Tab` | Switch focus between panels (Log, Artifacts, State). |
+
+### Panels
+
+1.  **Activity Log**: Real-time event ticker showing steps, worker calls, and tool outputs.
+2.  **Artifacts**: Live view of generated artifacts. Select an artifact to view its full content.
+3.  **State**: JSON view of the current `Blackboard` state (goal, status, metadata).
+
+<details>
+<summary><strong>Legacy TUI (Deprecated)</strong></summary>
+
+The original `rich`-based TUI is still available but deprecated.
+
+```python
+import warnings
+from blackboard.tui_legacy import BlackboardTUI, watch
+
+# Usage
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    result = watch(orchestrator, goal="...")
+```
+
+</details>
 
 ---
 
@@ -989,9 +1027,7 @@ The SDK now safely executes inside existing event loops (FastAPI, Jupyter, neste
 # Works in FastAPI routes, Jupyter notebooks, etc.
 result = orchestrator.run_sync(goal="...")  # No RuntimeError
 
-# Also safe in TUI
-from blackboard.tui import watch
-result = watch(orchestrator, goal="...")
+
 ```
 
 ### Smart Context Management
@@ -1602,34 +1638,7 @@ blackboard optimize review --patches-file blackboard.patches.json
 
 ---
 
-## Interactive TUI (v1.7.0)
 
-A Textual-based Mission Control for real-time debugging:
-
-```python
-from blackboard.ui import create_tui, is_headless
-
-# Check if running in CI
-if not is_headless():
-    app = create_tui(orchestrator)
-    await app.run_async()
-```
-
-### Key Bindings
-
-| Key | Action |
-|-----|--------|
-| `Space` | Pause/Resume execution |
-| `I` | Inject intervention command |
-| `Q` | Quit |
-
-### Features
-- **3-pane dashboard**: Log, Artifacts, State
-- **Pause/Resume**: Stop execution at any point
-- **Intervention**: Inject commands mid-execution
-- **Headless detection**: Auto-detects CI environments
-
----
 
 ## Ecosystem Adapters (v1.7.0)
 
