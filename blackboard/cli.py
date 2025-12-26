@@ -206,6 +206,59 @@ def main() -> int:
     )
     ui_parser.set_defaults(func=cmd_ui)
     
+    # init command - scaffolding
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialize a new Blackboard project with prompts directory and config"
+    )
+    init_parser.add_argument(
+        "--prompts-dir",
+        default="prompts/",
+        help="Directory for prompt templates (default: prompts/)"
+    )
+    init_parser.add_argument(
+        "--config-path",
+        default="blackboard.prompts.json",
+        help="Path for prompts config (default: blackboard.prompts.json)"
+    )
+    init_parser.set_defaults(func=cmd_init)
+    
+    # optimize command group
+    optimize_parser = subparsers.add_parser(
+        "optimize",
+        help="Run the instruction optimizer"
+    )
+    optimize_subparsers = optimize_parser.add_subparsers(dest="optimize_cmd")
+    
+    # optimize run
+    optimize_run_parser = optimize_subparsers.add_parser(
+        "run",
+        help="Analyze failures and generate prompt patches"
+    )
+    optimize_run_parser.add_argument(
+        "--session-id",
+        required=True,
+        help="Session ID to analyze"
+    )
+    optimize_run_parser.add_argument(
+        "--db-path",
+        default="./blackboard.db",
+        help="SQLite database path (default: ./blackboard.db)"
+    )
+    optimize_run_parser.set_defaults(func=cmd_optimize_run)
+    
+    # optimize review
+    optimize_review_parser = optimize_subparsers.add_parser(
+        "review",
+        help="Review and apply pending prompt patches"
+    )
+    optimize_review_parser.add_argument(
+        "--patches-file",
+        default="blackboard.patches.json",
+        help="Path to patches file (default: blackboard.patches.json)"
+    )
+    optimize_review_parser.set_defaults(func=cmd_optimize_review)
+    
     args = parser.parse_args()
     
     if args.version:
@@ -216,6 +269,70 @@ def main() -> int:
         return 0
     
     return args.func(args)
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Initialize a new Blackboard project."""
+    from blackboard.prompts import create_default_prompts_dir, create_default_config
+    
+    print("Initializing Blackboard project...")
+    
+    # Create prompts directory
+    create_default_prompts_dir(args.prompts_dir)
+    print(f"  Created: {args.prompts_dir}")
+    
+    # Create config file
+    create_default_config(args.config_path)
+    print(f"  Created: {args.config_path}")
+    
+    print("\nProject initialized! You can now:")
+    print("  - Add prompt templates to the prompts/ directory")
+    print("  - Configure prompt overrides in blackboard.prompts.json")
+    return 0
+
+
+def cmd_optimize_run(args: argparse.Namespace) -> int:
+    """Run the instruction optimizer."""
+    print(f"Running optimizer on session: {args.session_id}")
+    print(f"Database: {args.db_path}")
+    print()
+    print("Note: Full optimizer implementation requires the optimize.py module.")
+    print("This is a placeholder for the optimization workflow.")
+    return 0
+
+
+def cmd_optimize_review(args: argparse.Namespace) -> int:
+    """Review pending prompt patches."""
+    from pathlib import Path
+    import json
+    
+    patches_path = Path(args.patches_file)
+    
+    if not patches_path.exists():
+        print(f"No patches file found: {args.patches_file}")
+        print("Run 'blackboard optimize run' first to generate patches.")
+        return 1
+    
+    try:
+        patches = json.loads(patches_path.read_text())
+    except Exception as e:
+        print(f"Error reading patches file: {e}")
+        return 1
+    
+    if not patches:
+        print("No pending patches to review.")
+        return 0
+    
+    print(f"Found {len(patches)} pending patch(es):\n")
+    
+    for i, patch in enumerate(patches, 1):
+        worker_name = patch.get("worker_name", "Unknown")
+        print(f"[{i}] Worker: {worker_name}")
+        print(f"    Reasoning: {patch.get('reasoning', 'N/A')[:100]}...")
+        print()
+    
+    print("Note: Full interactive review requires the optimize.py module.")
+    return 0
 
 
 if __name__ == "__main__":

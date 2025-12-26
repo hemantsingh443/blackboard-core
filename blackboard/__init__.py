@@ -91,7 +91,21 @@ from .pricing import (
     configure_pricing,
 )
 
-__version__ = "1.6.2"
+# Prompt Registry (v1.6.3)
+from .prompts import (
+    PromptRegistry,
+    create_default_prompts_dir,
+    create_default_config,
+)
+
+# Optimizer (v1.6.3)
+from .optimize import (
+    Optimizer,
+    PromptPatch,
+    run_optimization,
+)
+
+__version__ = "1.6.3"
 
 __all__ = [
     # State
@@ -152,6 +166,14 @@ __all__ = [
     "estimate_cost",
     "BudgetExceededError",
     "configure_pricing",
+    # Prompt Registry (v1.6.3)
+    "PromptRegistry",
+    "create_default_prompts_dir",
+    "create_default_config",
+    # Optimizer (v1.6.3)
+    "Optimizer",
+    "PromptPatch",
+    "run_optimization",
     # Version
     "__version__",
 ]

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackboard-core"
-version = "1.6.2"
+version = "1.6.3"
 description = "A Python SDK implementing the Blackboard Pattern for LLM-powered multi-agent systems"
 readme = "README.md"
 license = {file = "LICENSE"}
@@ -30,6 +30,7 @@ dependencies = [
     "typing-extensions>=4.0.0",
     "litellm>=1.40.0",  # Default LLM client - 100+ model support
     "structlog>=24.0.0",  # Structured logging with contextvars
+    "jinja2>=3.0.0",  # Prompt templating (v1.6.3)
 ]
 
 [project.optional-dependencies]

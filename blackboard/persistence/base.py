@@ -149,3 +149,71 @@ class HeartbeatCapable(Protocol):
             List of session IDs that appear to be zombies
         """
         ...
+
+
+class CheckpointCapable(Protocol):
+    """
+    Extension protocol for backends that support state checkpoints.
+    
+    This enables "time travel" debugging by storing full state snapshots
+    at each step, allowing session forking and state reconstruction.
+    
+    Example:
+        # Save checkpoint after each step
+        await persistence.save_checkpoint(session_id, step_index, state)
+        
+        # Load state at a specific step for debugging
+        historical_state = await persistence.load_state_at_step(session_id, 5)
+        
+        # List all checkpoints for a session
+        checkpoints = await persistence.list_checkpoints(session_id)
+    """
+    
+    async def save_checkpoint(
+        self,
+        session_id: str,
+        step_index: int,
+        state: "Blackboard"
+    ) -> None:
+        """
+        Save a state checkpoint for a specific step.
+        
+        Args:
+            session_id: Session identifier
+            step_index: The step number (1-indexed)
+            state: Full blackboard state to snapshot
+        """
+        ...
+    
+    async def load_state_at_step(
+        self,
+        session_id: str,
+        step_index: int
+    ) -> "Blackboard":
+        """
+        Load the state checkpoint at a specific step.
+        
+        Args:
+            session_id: Session identifier
+            step_index: The step number to load
+            
+        Returns:
+            The Blackboard state as it was at that step
+            
+        Raises:
+            SessionNotFoundError: If session doesn't exist
+            PersistenceError: If checkpoint at step doesn't exist
+        """
+        ...
+    
+    async def list_checkpoints(self, session_id: str) -> List[int]:
+        """
+        List all available checkpoint step indices for a session.
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            Sorted list of step indices with checkpoints
+        """
+        ...

@@ -17,6 +17,8 @@ from .base import (
     PersistenceError,
     SessionNotFoundError,
     SessionConflictError,
+    HeartbeatCapable,
+    CheckpointCapable,
 )
 from .memory import InMemoryPersistence
 from .sqlite import SQLitePersistence
@@ -35,6 +37,8 @@ except ImportError:
 __all__ = [
     # Protocols
     "PersistenceLayer",
+    "HeartbeatCapable",
+    "CheckpointCapable",
     # Errors
     "PersistenceError",
     "SessionNotFoundError",

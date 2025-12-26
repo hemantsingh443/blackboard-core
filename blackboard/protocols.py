@@ -122,6 +122,7 @@ class Worker(ABC):
     description: str = "A worker in the blackboard system"
     input_schema: Optional[Type[WorkerInput]] = None  # Optional structured input
     parallel_safe: bool = False  # Set True only for read-only/stateless workers
+    prompt_key: str = ""  # Key for PromptRegistry lookup (defaults to name if empty)
     
     @abstractmethod
     async def run(

@@ -458,6 +458,71 @@ class Orchestrator:
         
         return state
 
+    async def fork_session(
+        self,
+        session_id: str,
+        step_index: int,
+        fork_suffix: Optional[str] = None
+    ) -> str:
+        """
+        Fork a session at a specific step index for time-travel debugging.
+        
+        Creates a new session by loading the checkpoint at the given step,
+        generating a new session ID, and saving it as a fresh session.
+        This enables "what if" experiments without polluting the original session.
+        
+        Args:
+            session_id: ID of the session to fork
+            step_index: Step number to fork from (must have a checkpoint)
+            fork_suffix: Optional suffix for fork ID (defaults to timestamp)
+            
+        Returns:
+            The new forked session ID
+            
+        Raises:
+            ValueError: If persistence layer doesn't support checkpoints
+            PersistenceError: If no checkpoint exists at that step
+            
+        Example:
+            # Original session failed at step 10
+            # Fork from step 9 to try a different approach
+            fork_id = await orchestrator.fork_session("session-001", 9)
+            
+            # Load forked state and continue
+            forked_state = await persistence.load(fork_id)
+            result = await orchestrator.run(state=forked_state)
+        """
+        if not self.persistence:
+            raise ValueError("Persistence layer required for session forking")
+        
+        if not hasattr(self.persistence, 'load_state_at_step'):
+            raise ValueError("Persistence layer doesn't support checkpoints (CheckpointCapable required)")
+        
+        # Load checkpoint at the specified step
+        from datetime import datetime
+        forked_state = await self.persistence.load_state_at_step(session_id, step_index)
+        
+        # Generate fork session ID
+        if fork_suffix is None:
+            fork_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+        fork_session_id = f"{session_id}_fork_{fork_suffix}"
+        
+        # Update metadata to track lineage
+        forked_state.metadata["session_id"] = fork_session_id
+        forked_state.metadata["forked_from"] = session_id
+        forked_state.metadata["forked_at_step"] = step_index
+        forked_state.metadata["fork_timestamp"] = datetime.now().isoformat()
+        
+        # Reset version for new session
+        forked_state.version = 0
+        
+        # Save as new session
+        await self.persistence.save(forked_state, fork_session_id, parent_session_id=session_id)
+        
+        logger.info(f"Forked session {session_id} at step {step_index} -> {fork_session_id}")
+        
+        return fork_session_id
+
     def _build_tool_definitions(self, workers: List[Worker]) -> List[ToolDefinition]:
         """
         Build tool definitions from workers.
@@ -638,6 +703,10 @@ class Orchestrator:
                 parent_session_id = state.metadata.get("parent_session_id")
                 try:
                     await self.persistence.save(state, session_id, parent_session_id=parent_session_id)
+                    
+                    # Save checkpoint for time-travel debugging if persistence supports it
+                    if hasattr(self.persistence, 'save_checkpoint'):
+                        await self.persistence.save_checkpoint(session_id, state.step_count, state)
                 except Exception as e:
                     logger.warning(f"Persistence save failed: {e}")
             

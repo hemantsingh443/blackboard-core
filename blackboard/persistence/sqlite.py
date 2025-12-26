@@ -16,6 +16,7 @@ from .base import (
     SessionNotFoundError,
     SessionConflictError,
     HeartbeatCapable,
+    CheckpointCapable,
 )
 
 if TYPE_CHECKING:
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("blackboard.persistence.sqlite")
 
 
-class SQLitePersistence(HeartbeatCapable):
+class SQLitePersistence(HeartbeatCapable, CheckpointCapable):
     """
     SQLite-based persistence for production deployments.
     
@@ -50,7 +51,7 @@ class SQLitePersistence(HeartbeatCapable):
         await persistence.save(state, "session-001")
     """
     
-    # SQL Schema with heartbeat support
+    # SQL Schema with heartbeat and checkpoint support
     SCHEMA = '''
     CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -78,11 +79,22 @@ class SQLitePersistence(HeartbeatCapable):
         FOREIGN KEY(parent_event_id) REFERENCES events(id)
     );
     
+    CREATE TABLE IF NOT EXISTS session_checkpoints (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        step_index INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        data JSON NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        UNIQUE(session_id, step_index)
+    );
+    
     CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
     CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_heartbeat ON sessions(heartbeat_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_session_step ON session_checkpoints(session_id, step_index);
     '''
     
     def __init__(
@@ -426,6 +438,127 @@ class SQLitePersistence(HeartbeatCapable):
             }
             for row in rows
         ]
+    
+    # =========================================================================
+    # Checkpoint Support (CheckpointCapable) - Time Travel Debugging
+    # =========================================================================
+    
+    async def save_checkpoint(
+        self,
+        session_id: str,
+        step_index: int,
+        state: "Blackboard"
+    ) -> None:
+        """
+        Save a state checkpoint for a specific step.
+        
+        Uses UPSERT to handle re-runs of the same step (e.g., after a crash).
+        """
+        import uuid
+        
+        await self.initialize()
+        conn = await self._get_connection()
+        
+        checkpoint_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+        
+        async with self._lock:
+            await conn.execute(
+                '''
+                INSERT INTO session_checkpoints (id, session_id, step_index, created_at, data)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, step_index) DO UPDATE SET
+                    data = excluded.data,
+                    created_at = excluded.created_at
+                ''',
+                (
+                    checkpoint_id,
+                    session_id,
+                    step_index,
+                    now,
+                    state.model_dump_json()
+                )
+            )
+            await conn.commit()
+            logger.debug(f"Saved checkpoint for session {session_id} at step {step_index}")
+    
+    async def load_state_at_step(
+        self,
+        session_id: str,
+        step_index: int
+    ) -> "Blackboard":
+        """
+        Load the state checkpoint at a specific step.
+        
+        Args:
+            session_id: Session identifier
+            step_index: The step number to load
+            
+        Returns:
+            The Blackboard state as it was at that step
+            
+        Raises:
+            SessionNotFoundError: If session doesn't exist
+            PersistenceError: If checkpoint at step doesn't exist
+        """
+        from ..state import Blackboard
+        
+        await self.initialize()
+        conn = await self._get_connection()
+        
+        cursor = await conn.execute(
+            "SELECT data FROM session_checkpoints WHERE session_id = ? AND step_index = ?",
+            (session_id, step_index)
+        )
+        row = await cursor.fetchone()
+        
+        if row is None:
+            # Check if session exists at all
+            if not await self.exists(session_id):
+                raise SessionNotFoundError(f"Session not found: {session_id}")
+            raise PersistenceError(f"No checkpoint at step {step_index} for session {session_id}")
+        
+        try:
+            return Blackboard.model_validate_json(row["data"])
+        except Exception as e:
+            raise PersistenceError(f"Failed to deserialize checkpoint: {e}") from e
+    
+    async def list_checkpoints(self, session_id: str) -> List[int]:
+        """
+        List all available checkpoint step indices for a session.
+        
+        Returns:
+            Sorted list of step indices with checkpoints
+        """
+        await self.initialize()
+        conn = await self._get_connection()
+        
+        cursor = await conn.execute(
+            "SELECT step_index FROM session_checkpoints WHERE session_id = ? ORDER BY step_index ASC",
+            (session_id,)
+        )
+        rows = await cursor.fetchall()
+        return [row["step_index"] for row in rows]
+    
+    async def delete_checkpoints(self, session_id: str) -> int:
+        """
+        Delete all checkpoints for a session.
+        
+        Returns:
+            Number of checkpoints deleted
+        """
+        await self.initialize()
+        conn = await self._get_connection()
+        
+        async with self._lock:
+            cursor = await conn.execute(
+                "DELETE FROM session_checkpoints WHERE session_id = ?",
+                (session_id,)
+            )
+            await conn.commit()
+            deleted = cursor.rowcount
+            logger.debug(f"Deleted {deleted} checkpoints for session {session_id}")
+            return deleted
     
     async def close(self) -> None:
         """Close the database connection."""

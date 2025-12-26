@@ -14,6 +14,7 @@ from .base import (
     SessionNotFoundError,
     SessionConflictError,
     HeartbeatCapable,
+    CheckpointCapable,
 )
 
 if TYPE_CHECKING:
@@ -22,7 +23,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("blackboard.persistence.postgres")
 
 
-class PostgresPersistence(HeartbeatCapable):
+class PostgresPersistence(HeartbeatCapable, CheckpointCapable):
     """
     PostgreSQL-based persistence for distributed production deployments.
     
@@ -49,7 +50,7 @@ class PostgresPersistence(HeartbeatCapable):
         await persistence.save(state, "session-001")
     """
     
-    # SQL Schema for PostgreSQL
+    # SQL Schema for PostgreSQL with checkpoint support
     SCHEMA = '''
     CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -74,11 +75,21 @@ class PostgresPersistence(HeartbeatCapable):
         timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     
+    CREATE TABLE IF NOT EXISTS session_checkpoints (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        step_index INTEGER NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        data JSONB NOT NULL,
+        UNIQUE(session_id, step_index)
+    );
+    
     CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
     CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_heartbeat ON sessions(heartbeat_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+    CREATE INDEX IF NOT EXISTS idx_checkpoints_session_step ON session_checkpoints(session_id, step_index);
     '''
     
     def __init__(
@@ -365,6 +376,103 @@ class PostgresPersistence(HeartbeatCapable):
             }
             for row in rows
         ]
+    
+    # =========================================================================
+    # Checkpoint Support (CheckpointCapable) - Time Travel Debugging
+    # =========================================================================
+    
+    async def save_checkpoint(
+        self,
+        session_id: str,
+        step_index: int,
+        state: "Blackboard"
+    ) -> None:
+        """
+        Save a state checkpoint for a specific step.
+        
+        Uses UPSERT to handle re-runs of the same step (e.g., after a crash).
+        """
+        import uuid
+        
+        await self.initialize()
+        pool = await self._get_pool()
+        
+        checkpoint_id = str(uuid.uuid4())
+        
+        async with pool.acquire() as conn:
+            await conn.execute(
+                '''
+                INSERT INTO session_checkpoints (id, session_id, step_index, data)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (session_id, step_index) DO UPDATE SET
+                    data = EXCLUDED.data,
+                    created_at = NOW()
+                ''',
+                checkpoint_id,
+                session_id,
+                step_index,
+                state.model_dump_json()
+            )
+        
+        logger.debug(f"Saved checkpoint for session {session_id} at step {step_index}")
+    
+    async def load_state_at_step(
+        self,
+        session_id: str,
+        step_index: int
+    ) -> "Blackboard":
+        """
+        Load the state checkpoint at a specific step.
+        """
+        from ..state import Blackboard
+        
+        await self.initialize()
+        pool = await self._get_pool()
+        
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT data FROM session_checkpoints WHERE session_id = $1 AND step_index = $2",
+                session_id, step_index
+            )
+        
+        if row is None:
+            if not await self.exists(session_id):
+                raise SessionNotFoundError(f"Session not found: {session_id}")
+            raise PersistenceError(f"No checkpoint at step {step_index} for session {session_id}")
+        
+        try:
+            return Blackboard.model_validate_json(row["data"])
+        except Exception as e:
+            raise PersistenceError(f"Failed to deserialize checkpoint: {e}") from e
+    
+    async def list_checkpoints(self, session_id: str) -> List[int]:
+        """List all available checkpoint step indices for a session."""
+        await self.initialize()
+        pool = await self._get_pool()
+        
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT step_index FROM session_checkpoints WHERE session_id = $1 ORDER BY step_index ASC",
+                session_id
+            )
+        
+        return [row["step_index"] for row in rows]
+    
+    async def delete_checkpoints(self, session_id: str) -> int:
+        """Delete all checkpoints for a session."""
+        await self.initialize()
+        pool = await self._get_pool()
+        
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM session_checkpoints WHERE session_id = $1",
+                session_id
+            )
+        
+        # Parse the result string "DELETE N" to get count
+        deleted = int(result.split(" ")[1]) if result else 0
+        logger.debug(f"Deleted {deleted} checkpoints for session {session_id}")
+        return deleted
     
     async def close(self) -> None:
         """Close the connection pool."""

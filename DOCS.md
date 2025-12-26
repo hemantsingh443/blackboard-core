@@ -27,7 +27,11 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 21. [Blackboard Serve (API Deployment)](#blackboard-serve-api-deployment)
 22. [Events & Observability](#events--observability)
 23. [Error Handling](#error-handling)
-24. [Best Practices](#best-practices)
+24. [Time-Travel Debugging (v1.6.3)](#time-travel-debugging-v163)
+25. [Prompt Registry (v1.6.3)](#prompt-registry-v163)
+26. [Instruction Optimizer (v1.6.3)](#instruction-optimizer-v163)
+27. [CLI Commands (v1.6.3)](#cli-commands-v163)
+28. [Best Practices](#best-practices)
 
 ---
 
@@ -1451,3 +1455,158 @@ config = BlackboardConfig(reasoning_strategy="cot")
 ```
 
 The supervisor will produce structured thinking before each decision.
+
+---
+
+## Time-Travel Debugging (v1.6.3)
+
+Fork sessions at any checkpoint to experiment with different approaches:
+
+```python
+from blackboard import Orchestrator, SQLitePersistence
+
+persistence = SQLitePersistence("./sessions.db")
+await persistence.initialize()
+
+orchestrator = Orchestrator(llm=llm, workers=workers)
+orchestrator.set_persistence(persistence)
+
+# Run original session (checkpoints saved automatically)
+result = await orchestrator.run(goal="Write an article")
+
+# Later: fork at step 5 to try different approach
+session_id = result.metadata["session_id"]
+fork_id = await orchestrator.fork_session(session_id, step_index=5)
+
+# Load and continue from forked state
+forked = await persistence.load(fork_id)
+new_result = await orchestrator.run(state=forked)
+```
+
+### Checkpoint API
+
+```python
+# Manual checkpoint operations
+await persistence.save_checkpoint(session_id, step_index, state)
+state_at_step = await persistence.load_state_at_step(session_id, 5)
+checkpoints = await persistence.list_checkpoints(session_id)
+await persistence.delete_checkpoints(session_id)
+```
+
+---
+
+## Prompt Registry (v1.6.3)
+
+Externalize prompts for easier customization without code changes:
+
+```python
+from blackboard import PromptRegistry
+
+# Initialize registry
+registry = PromptRegistry(
+    prompts_dir="prompts/",           # Jinja2 templates
+    config_path="blackboard.prompts.json"  # JSON overrides
+)
+
+# Get rendered prompt
+prompt = registry.get("Writer", {"topic": "AI safety", "style": "formal"})
+
+# Runtime override (for testing/optimization)
+registry.set("Writer", "New prompt: {{ topic }}")
+
+# List available prompts
+keys = registry.list_keys()  # {"Writer": "config", "Critic": "template"}
+```
+
+### Template Files
+
+Create `prompts/Writer.jinja2`:
+
+```jinja2
+You are a professional writer.
+
+{% if style %}
+Style: {{ style }}
+{% endif %}
+
+Topic: {{ topic }}
+```
+
+---
+
+## Instruction Optimizer (v1.6.3)
+
+Automatically analyze failures and generate improved prompts:
+
+```python
+from blackboard import Optimizer, PromptPatch
+
+optimizer = Optimizer(llm=meta_llm, orchestrator=orchestrator)
+
+# Find failures in a session
+failures = await optimizer.analyze_failures("session-001")
+
+# Generate improved prompts
+for failure in failures:
+    candidates = await optimizer.generate_candidates(failure, n=3)
+    
+    # Verify by forking and re-running
+    for patch in candidates:
+        verified = await optimizer.verify_candidate(patch, failure)
+        if verified.verified:
+            print(f"Found fix for {patch.worker_name}")
+            break
+
+# Save patches for human review
+optimizer.save_patches(verified_patches, "blackboard.patches.json")
+```
+
+### PromptPatch Structure
+
+```python
+@dataclass
+class PromptPatch:
+    worker_name: str
+    prompt_key: str
+    original: str
+    original_hash: str  # SHA256 for conflict detection
+    proposed: str
+    reasoning: str
+    verification_score: float
+    verified: bool
+```
+
+---
+
+## CLI Commands (v1.6.3)
+
+### Initialize Project
+
+```bash
+blackboard init
+# Creates:
+#   prompts/           - Directory for Jinja2 templates
+#   prompts/example.jinja2  - Example template
+#   blackboard.prompts.json - Config file
+```
+
+### Optimize Prompts
+
+```bash
+# Analyze failures and generate patches
+blackboard optimize run --session-id my-session --db-path ./blackboard.db
+
+# Review pending patches
+blackboard optimize review --patches-file blackboard.patches.json
+```
+
+---
+
+## Best Practices
+
+1. **Use persistence** for production deployments
+2. **Set recursion limits** when using fractal agents
+3. **Enable CoT** for complex decision-making
+4. **Use SQLite** for single-node, PostgreSQL for distributed
+5. **Externalize prompts** for easy iteration without code changes
+6. **Fork sessions** to debug failures without rerunning from scratch

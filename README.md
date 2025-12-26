@@ -43,6 +43,10 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 - **Structured Logging (v1.6.2)** - JSON logs with session/trace correlation via structlog
 - **Cost Control (v1.6.2)** - LiteLLM pricing integration and budget circuit breakers
 - **Testing Harness (v1.6.2)** - MockLLMClient and OrchestratorTestFixture
+- **Time-Travel Debugging (v1.6.3)** - Fork sessions at any checkpoint, replay with different prompts
+- **Prompt Registry (v1.6.3)** - Externalized prompts with Jinja2 templates and JSON config
+- **Instruction Optimizer (v1.6.3)** - Auto-analyze failures and generate improved prompts
+- **CLI Scaffolding (v1.6.3)** - `blackboard init` to bootstrap projects
 - **LiteLLM Integration** - 100+ LLM providers via `LiteLLMClient`
 - **Model Context Protocol** - Connect to MCP servers for external tools
 - **OpenTelemetry** - Distributed tracing with span hierarchy
