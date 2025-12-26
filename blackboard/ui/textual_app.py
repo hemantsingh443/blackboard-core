@@ -270,7 +270,8 @@ if _HAS_TEXTUAL:
             """Called when app is mounted."""
             self.log_panel.add_event("start", "Blackboard TUI initialized")
             if self.orchestrator:
-                self.log_panel.add_event("info", f"Orchestrator attached with {len(self.orchestrator.workers)} workers")
+                worker_count = len(self.orchestrator.registry.list_workers()) if hasattr(self.orchestrator, 'registry') else '?'
+                self.log_panel.add_event("info", f"Orchestrator attached with {worker_count} workers")
         
         @property
         def log_panel(self) -> LogPanel:
