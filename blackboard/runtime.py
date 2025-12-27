@@ -299,13 +299,18 @@ class DockerRuntime:
         """Execute code in a Docker container."""
         import time
         import subprocess
+        import uuid
         
         start_time = time.time()
         timeout = timeout or self.timeout
         
+        # Generate unique container name for reliable cleanup
+        container_name = f"blackboard-exec-{uuid.uuid4().hex[:12]}"
+        
         # Build docker command
         cmd = [
             "docker", "run", "--rm",
+            f"--name={container_name}",
             f"--memory={self.memory_limit}",
             f"--cpus={self.cpu_limit}",
         ]
@@ -334,7 +339,11 @@ class DockerRuntime:
                     timeout=timeout
                 )
             except asyncio.TimeoutError:
-                subprocess.run(["docker", "kill", str(process.pid)], capture_output=True)
+                # Kill container by name (not PID, which is the docker client process)
+                subprocess.run(["docker", "kill", container_name], capture_output=True)
+                # Also kill client process to prevent zombie
+                process.kill()
+                await process.wait()
                 raise RuntimeTimeoutError(f"Docker execution timed out after {timeout}s")
             
             execution_time = time.time() - start_time

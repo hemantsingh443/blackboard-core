@@ -100,13 +100,26 @@ class SQLitePersistence(HeartbeatCapable, CheckpointCapable):
     def __init__(
         self,
         db_path: str = "./blackboard.db",
-        shared_connection: Optional["SQLitePersistence"] = None
+        shared_connection: Optional["SQLitePersistence"] = None,
+        checkpoint_interval: int = 1
     ):
+        """
+        Initialize SQLite persistence.
+        
+        Args:
+            db_path: Path to SQLite database file
+            shared_connection: If provided, share connection with parent
+            checkpoint_interval: Save full state every N steps (default: 1 = every step).
+                                 Higher values improve performance but increase data loss
+                                 risk on crash. Set to 5-10 for long-running sessions.
+        """
         self.db_path = db_path
         self._connection = None
         self._shared = shared_connection
         self._initialized = False
         self._lock = asyncio.Lock()
+        self._checkpoint_interval = checkpoint_interval
+        self._step_counter: dict = {}  # session_id -> step count since last save
     
     async def _get_connection(self):
         """Get or create database connection."""
@@ -157,11 +170,39 @@ class SQLitePersistence(HeartbeatCapable, CheckpointCapable):
             self._initialized = True
             logger.info(f"SQLite schema initialized: {self.db_path}")
     
+    async def close(self) -> None:
+        """
+        Close the database connection.
+        
+        Call this when done with persistence to prevent resource leaks
+        and terminal freeze issues on Windows.
+        """
+        if self._connection is not None:
+            try:
+                await self._connection.close()
+                logger.debug(f"Closed SQLite connection: {self.db_path}")
+            except Exception as e:
+                logger.warning(f"Error closing SQLite connection: {e}")
+            finally:
+                self._connection = None
+                self._initialized = False
+    
+    async def __aenter__(self):
+        """Async context manager entry."""
+        await self.initialize()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit - closes connection."""
+        await self.close()
+        return False
+    
     async def save(
         self,
         state: "Blackboard",
         session_id: str,
-        parent_session_id: Optional[str] = None
+        parent_session_id: Optional[str] = None,
+        force_full_save: bool = False
     ) -> None:
         """
         Save state to SQLite with optimistic locking.
@@ -170,6 +211,7 @@ class SQLitePersistence(HeartbeatCapable, CheckpointCapable):
             state: Blackboard state to persist
             session_id: Unique session identifier
             parent_session_id: Optional parent session (for sub-agents)
+            force_full_save: If True, always save full state regardless of interval
         """
         await self.initialize()
         conn = await self._get_connection()
@@ -193,32 +235,64 @@ class SQLitePersistence(HeartbeatCapable, CheckpointCapable):
             state.version += 1
             now = datetime.now().isoformat()
             
-            # Upsert session
-            await conn.execute(
-                '''
-                INSERT INTO sessions (id, parent_session_id, goal, status, version, created_at, updated_at, heartbeat_at, data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    status = excluded.status,
-                    version = excluded.version,
-                    updated_at = excluded.updated_at,
-                    heartbeat_at = excluded.heartbeat_at,
-                    data = excluded.data
-                ''',
-                (
-                    session_id,
-                    parent_session_id,
-                    state.goal,
-                    state.status.value if hasattr(state.status, 'value') else str(state.status),
-                    state.version,
-                    now,
-                    now,
-                    now,  # Initial heartbeat
-                    state.model_dump_json()
-                )
+            # Checkpoint interval logic: skip full JSON dump if interval not reached
+            self._step_counter[session_id] = self._step_counter.get(session_id, 0) + 1
+            should_full_save = (
+                force_full_save or
+                row is None or  # First save for this session
+                self._step_counter[session_id] >= self._checkpoint_interval or
+                state.status.value in ("done", "failed", "paused")  # Terminal states
             )
+            
+            if should_full_save:
+                # Full state save
+                self._step_counter[session_id] = 0
+                await conn.execute(
+                    '''
+                    INSERT INTO sessions (id, parent_session_id, goal, status, version, created_at, updated_at, heartbeat_at, data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        status = excluded.status,
+                        version = excluded.version,
+                        updated_at = excluded.updated_at,
+                        heartbeat_at = excluded.heartbeat_at,
+                        data = excluded.data
+                    ''',
+                    (
+                        session_id,
+                        parent_session_id,
+                        state.goal,
+                        state.status.value if hasattr(state.status, 'value') else str(state.status),
+                        state.version,
+                        now,
+                        now,
+                        now,
+                        state.model_dump_json()
+                    )
+                )
+                logger.debug(f"Saved session {session_id} (v{state.version}) [full]")
+            else:
+                # Lightweight update: only metadata, no JSON serialization
+                await conn.execute(
+                    '''
+                    UPDATE sessions SET
+                        status = ?,
+                        version = ?,
+                        updated_at = ?,
+                        heartbeat_at = ?
+                    WHERE id = ?
+                    ''',
+                    (
+                        state.status.value if hasattr(state.status, 'value') else str(state.status),
+                        state.version,
+                        now,
+                        now,
+                        session_id
+                    )
+                )
+                logger.debug(f"Saved session {session_id} (v{state.version}) [metadata only]")
+            
             await conn.commit()
-            logger.debug(f"Saved session {session_id} (v{state.version})")
     
     async def load(self, session_id: str) -> "Blackboard":
         """Load state from SQLite."""
