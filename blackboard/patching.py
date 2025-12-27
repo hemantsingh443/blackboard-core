@@ -298,3 +298,16 @@ class ArtifactMutation:
     def apply_to(self, content: str, fail_on_first_error: bool = True) -> PatchResult:
         """Apply this mutation's patches to content."""
         return apply_patches(content, self.patches, fail_on_first_error)
+
+
+# =============================================================================
+# Exports
+# =============================================================================
+
+__all__ = [
+    "PatchOperation",
+    "SearchReplacePatch",
+    "PatchResult",
+    "ArtifactMutation",
+    "apply_patches",
+]
