@@ -8,7 +8,7 @@ All state is stored in typed Pydantic models for strict validation.
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -221,6 +221,26 @@ class Blackboard(BaseModel):
         """Get all feedback entries for a specific artifact."""
         return [f for f in self.feedback if f.artifact_id == artifact_id]
 
+    def get_artifact(self, artifact_id: str) -> Optional[Artifact]:
+        """
+        Get an artifact by its ID.
+        
+        Args:
+            artifact_id: The unique ID of the artifact
+            
+        Returns:
+            The artifact if found, None otherwise
+            
+        Example:
+            artifact = state.get_artifact("abc-123")
+            if artifact:
+                print(f"Found: {artifact.type}")
+        """
+        for artifact in self.artifacts:
+            if artifact.id == artifact_id:
+                return artifact
+        return None
+
     def add_artifact(self, artifact: Artifact) -> Artifact:
         """
         Add a new artifact to the blackboard.
@@ -276,7 +296,9 @@ class Blackboard(BaseModel):
         max_tokens: int = 12000,
         chars_per_token: int = 4,
         max_artifacts: int = 3,
-        max_feedback: int = 5
+        max_feedback: int = 5,
+        artifact_filter: Optional[Callable[["Artifact"], bool]] = None,
+        feedback_filter: Optional[Callable[["Feedback"], bool]] = None,
     ) -> str:
         """
         Generate a token-aware context string for the supervisor LLM.
@@ -290,9 +312,26 @@ class Blackboard(BaseModel):
             chars_per_token: Approximate characters per token (default: 4)
             max_artifacts: Maximum number of recent artifacts to include
             max_feedback: Maximum number of recent feedback entries to include
+            artifact_filter: Optional function to filter which artifacts to include.
+                             If provided, only artifacts where filter(artifact) is True
+                             will be included. Applied before max_artifacts limit.
+            feedback_filter: Optional function to filter which feedback to include.
+                             If provided, only feedback where filter(fb) is True
+                             will be included. Applied before max_feedback limit.
             
         Returns:
             Context string within the token budget
+            
+        Example:
+            # Only show code artifacts
+            context = state.to_context_string(
+                artifact_filter=lambda a: a.type == "code"
+            )
+            
+            # Only show failed feedback
+            context = state.to_context_string(
+                feedback_filter=lambda f: not f.passed
+            )
         """
         max_chars = max_tokens * chars_per_token
         
@@ -313,12 +352,18 @@ class Blackboard(BaseModel):
         # Priority 2: Feedback (critical - supervisor needs to see errors)
         # =================================================================
         feedback_str = ""
-        recent_feedback = list(reversed(self.feedback[-max_feedback:])) if self.feedback else []
+        # Apply filter if provided, then take most recent
+        filtered_feedback = self.feedback
+        if feedback_filter:
+            filtered_feedback = [fb for fb in self.feedback if feedback_filter(fb)]
+        recent_feedback = list(reversed(filtered_feedback[-max_feedback:])) if filtered_feedback else []
+        
         if recent_feedback:
-            if len(self.feedback) > max_feedback:
-                feedback_str = f"\n## Recent Feedback ({len(self.feedback)} total, showing last {max_feedback})\n"
+            total_count = len(filtered_feedback)
+            if total_count > max_feedback:
+                feedback_str = f"\n## Recent Feedback ({total_count} total, showing last {max_feedback})\n"
             else:
-                feedback_str = f"\n## Feedback ({len(self.feedback)} total)\n"
+                feedback_str = f"\n## Feedback ({total_count} total)\n"
             
             for fb in recent_feedback:
                 status = "PASSED" if fb.passed else "FAILED"
@@ -330,13 +375,18 @@ class Blackboard(BaseModel):
         # Priority 3: Artifacts (variable - use smart truncation)
         # =================================================================
         artifacts_str = ""
-        recent_artifacts = self.artifacts[-max_artifacts:] if self.artifacts else []
+        # Apply filter if provided, then take most recent
+        filtered_artifacts = self.artifacts
+        if artifact_filter:
+            filtered_artifacts = [a for a in self.artifacts if artifact_filter(a)]
+        recent_artifacts = filtered_artifacts[-max_artifacts:] if filtered_artifacts else []
         
         if recent_artifacts:
-            if len(self.artifacts) > max_artifacts:
-                artifacts_str = f"\n## Artifacts ({len(self.artifacts)} total, showing last {max_artifacts})\n"
+            total_count = len(filtered_artifacts)
+            if total_count > max_artifacts:
+                artifacts_str = f"\n## Artifacts ({total_count} total, showing last {max_artifacts})\n"
             else:
-                artifacts_str = f"\n## Artifacts ({len(self.artifacts)} total)\n"
+                artifacts_str = f"\n## Artifacts ({total_count} total)\n"
             
             remaining_chars -= len(artifacts_str)
             

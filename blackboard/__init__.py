@@ -32,6 +32,34 @@ from .core import (
 # Configuration
 from .config import BlackboardConfig
 
+# Patching (Delta Protocol - v1.8.0)
+from .patching import (
+    SearchReplacePatch,
+    PatchOperation,
+    PatchResult,
+    ArtifactMutation,
+    apply_patches,
+)
+
+# Map-Reduce (Swarm Intelligence - v1.8.0)
+from .map_reduce import (
+    MapResult,
+    MapReduceResult,
+    MapReduceWorker,
+    ConflictResolution,
+    MutationConflict,
+    run_map_reduce,
+)
+
+# State Merging (Branch-Merge - v1.8.0)
+from .merging import (
+    MergeStrategy,
+    MergeConflict,
+    MergeResult,
+    merge_states,
+    StateMerger,
+)
+
 # Persistence 
 from .persistence import (
     PersistenceLayer,
@@ -105,7 +133,7 @@ from .optimize import (
     run_optimization,
 )
 
-__version__ = "1.7.0"
+__version__ = "1.8.0"
 
 __all__ = [
     # State
@@ -134,6 +162,25 @@ __all__ = [
     "RecursionDepthExceededError",
     # Configuration
     "BlackboardConfig",
+    # Patching (Delta Protocol - v1.8.0)
+    "SearchReplacePatch",
+    "PatchOperation",
+    "PatchResult",
+    "ArtifactMutation",
+    "apply_patches",
+    # Map-Reduce (Swarm Intelligence - v1.8.0)
+    "MapResult",
+    "MapReduceResult",
+    "MapReduceWorker",
+    "ConflictResolution",
+    "MutationConflict",
+    "run_map_reduce",
+    # State Merging (Branch-Merge - v1.8.0)
+    "MergeStrategy",
+    "MergeConflict",
+    "MergeResult",
+    "merge_states",
+    "StateMerger",
     # Persistence
     "PersistenceLayer",
     "SQLitePersistence",
@@ -177,3 +224,4 @@ __all__ = [
     # Version
     "__version__",
 ]
+

@@ -5,53 +5,28 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 ## Table of Contents
 
 **Getting Started**
+
 1. [Installation](#installation)
 2. [Core Concepts](#core-concepts)
 3. [Quick Start](#quick-start)
 
-**Building Agents**
-4. [Creating Workers](#creating-workers)
-5. [LLM Clients](#llm-clients)
-6. [Running the Orchestrator](#running-the-orchestrator)
+**Building Agents** 4. [Creating Workers](#creating-workers) 5. [LLM Clients](#llm-clients) 6. [Running the Orchestrator](#running-the-orchestrator)
 
-**State & Persistence**
-7. [Persistence](#persistence)
-8. [Memory System](#memory-system)
+**State & Persistence** 7. [Persistence](#persistence) 8. [Memory System](#memory-system)
 
-**Orchestration**
-9. [Middleware](#middleware)
-10. [Reasoning Strategies](#reasoning-strategies)
-11. [Blueprints](#blueprints)
-12. [Tool Calling](#tool-calling)
+**Orchestration** 9. [Middleware](#middleware) 10. [Reasoning Strategies](#reasoning-strategies) 11. [Blueprints](#blueprints) 12. [Tool Calling](#tool-calling)
 
-**Advanced Patterns**
-13. [Fractal Agents](#fractal-agents)
-14. [Model Context Protocol](#model-context-protocol)
+**Advanced Patterns** 13. [Fractal Agents](#fractal-agents) 14. [Model Context Protocol](#model-context-protocol) 15. [Swarm Intelligence](#swarm-intelligence)
 
-**Developer Experience**
-15. [Interactive TUI](#interactive-tui)
-16. [CLI Commands](#cli-commands)
-17. [Session Replay](#session-replay)
+**Developer Experience** 15. [Interactive TUI](#interactive-tui) 16. [CLI Commands](#cli-commands) 17. [Session Replay](#session-replay)
 
-**Production**
-18. [Runtime Security](#runtime-security)
-19. [OpenTelemetry](#opentelemetry)
-20. [Config Propagation](#config-propagation)
-21. [Error Handling](#error-handling)
+**Production** 18. [Runtime Security](#runtime-security) 19. [OpenTelemetry](#opentelemetry) 20. [Config Propagation](#config-propagation) 21. [Error Handling](#error-handling)
 
-**Ecosystem**
-22. [Ecosystem Adapters](#ecosystem-adapters)
-23. [Standard Library Workers](#standard-library-workers)
-24. [Blackboard Serve](#blackboard-serve)
+**Ecosystem** 22. [Ecosystem Adapters](#ecosystem-adapters) 23. [Standard Library Workers](#standard-library-workers) 24. [Blackboard Serve](#blackboard-serve)
 
-**Testing & Optimization**
-25. [Prompt Registry](#prompt-registry)
-26. [Instruction Optimizer](#instruction-optimizer)
-27. [Evaluation Framework](#evaluation-framework)
+**Testing & Optimization** 25. [Prompt Registry](#prompt-registry) 26. [Instruction Optimizer](#instruction-optimizer) 27. [Evaluation Framework](#evaluation-framework)
 
-**Reference**
-28. [Best Practices](#best-practices)
-29. [Deprecated APIs](#deprecated-apis)
+**Reference** 28. [Best Practices](#best-practices) 29. [Deprecated APIs](#deprecated-apis)
 
 ---
 
@@ -62,6 +37,7 @@ pip install blackboard-core
 ```
 
 Optional dependencies:
+
 ```bash
 pip install blackboard-core[redis]       # Redis persistence
 pip install blackboard-core[chroma]      # ChromaDB vector memory
@@ -221,18 +197,18 @@ from blackboard import Worker, WorkerOutput, Artifact, Feedback, Blackboard
 class ResearchWorker(Worker):
     name = "Researcher"
     description = "Gathers information on a topic"
-    
+
     input_schema = {
         "type": "object",
         "properties": {
             "topic": {"type": "string", "description": "Topic to research"}
         }
     }
-    
+
     async def run(self, state: Blackboard, inputs=None) -> WorkerOutput:
         topic = inputs.get("topic", state.goal) if inputs else state.goal
         research_result = f"Research findings about {topic}..."
-        
+
         return WorkerOutput(
             artifact=Artifact(
                 type="research",
@@ -272,7 +248,7 @@ class OpenAILLM(LLMClient):
     def __init__(self, model="gpt-4"):
         self.client = openai.AsyncOpenAI()
         self.model = model
-    
+
     async def generate(self, prompt: str) -> str:
         response = await self.client.chat.completions.create(
             model=self.model,
@@ -319,18 +295,18 @@ async def main():
         enable_parallel=True,
         verbose=True
     )
-    
+
     orchestrator = Orchestrator(
         llm=llm,
         workers=[write, critique],
         config=config
     )
-    
+
     result = await orchestrator.run(
         goal="Research AI safety and write a summary",
         max_steps=20
     )
-    
+
     print(f"Status: {result.status}")
     for artifact in result.artifacts:
         print(f"- {artifact.type}: {artifact.content[:100]}...")
@@ -455,12 +431,12 @@ orchestrator = Orchestrator(llm=llm, workers=[ResearchWorker(), memory_worker])
 
 ### Embedder Options
 
-| Embedder | Description | Requirements |
-|----------|-------------|--------------|
-| `NoOpEmbedder` | No embeddings (keyword search) | None |
-| `TFIDFEmbedder` | TF-IDF based | None |
-| `LocalEmbedder` | Sentence Transformers | `sentence-transformers` |
-| `OpenAIEmbedder` | OpenAI Embeddings API | `openai` |
+| Embedder         | Description                    | Requirements            |
+| ---------------- | ------------------------------ | ----------------------- |
+| `NoOpEmbedder`   | No embeddings (keyword search) | None                    |
+| `TFIDFEmbedder`  | TF-IDF based                   | None                    |
+| `LocalEmbedder`  | Sentence Transformers          | `sentence-transformers` |
+| `OpenAIEmbedder` | OpenAI Embeddings API          | `openai`                |
 
 ### Production Vector DB
 
@@ -529,10 +505,10 @@ from blackboard.middleware import Middleware, StepContext
 
 class MetricsMiddleware(Middleware):
     name = "MetricsMiddleware"
-    
+
     async def before_step(self, ctx: StepContext) -> None:
         ctx.state.metadata["step_start"] = time.time()
-    
+
     async def after_step(self, ctx: StepContext) -> None:
         duration = time.time() - ctx.state.metadata["step_start"]
         print(f"Step {ctx.step_number} took {duration:.2f}s")
@@ -679,6 +655,112 @@ orchestrator = Orchestrator(llm=llm, workers=workers)
 
 ---
 
+## Swarm Intelligence
+
+_Added in v1.8.0_
+
+Enable parallel sub-agent execution with the "Git-like Branch-Merge" pattern.
+
+### Delta Protocol (Artifact Patching)
+
+Return incremental changes instead of full artifact replacements:
+
+```python
+from blackboard import WorkerOutput, ArtifactMutation, SearchReplacePatch
+
+@worker
+def refactor(state: Blackboard) -> WorkerOutput:
+    """Refactors code using patches."""
+    artifact = state.artifacts[0]
+
+    return WorkerOutput(
+        mutations=[
+            ArtifactMutation(
+                artifact_id=artifact.id,
+                patches=[
+                    SearchReplacePatch(
+                        search="def old_name(",
+                        replace="def new_name("
+                    )
+                ]
+            )
+        ]
+    )
+```
+
+### Map-Reduce Pattern
+
+Process multiple items in parallel with conflict handling:
+
+```python
+from blackboard.map_reduce import run_map_reduce, ConflictResolution
+
+result = await run_map_reduce(
+    items=["auth.py", "db.py", "api.py"],
+    worker=CodeReviewerWorker(),
+    parent_state=state,
+    max_concurrency=3,
+    item_to_goal=lambda f: f"Review {f} for security issues",
+    conflict_resolution=ConflictResolution.FIRST_WINS
+)
+
+# Apply non-conflicting mutations
+for mutation in result.get_non_conflicting_mutations():
+    artifact = state.get_artifact(mutation.artifact_id)
+    # Apply patches...
+```
+
+### MapReduceWorker
+
+Wrap map-reduce as a Worker for use in Orchestrator:
+
+```python
+from blackboard.map_reduce import MapReduceWorker
+
+parallel_reviewer = MapReduceWorker(
+    name="ParallelCodeReviewer",
+    description="Reviews all code files in parallel",
+    inner_worker=CodeReviewWorker(),
+    items_extractor=lambda s: [a for a in s.artifacts if a.type == "code"],
+    max_concurrency=5,
+    conflict_resolution=ConflictResolution.FIRST_WINS
+)
+
+orchestrator = Orchestrator(llm=llm, workers=[parallel_reviewer])
+```
+
+### State Merging
+
+Merge forked sub-agent states back into parent:
+
+```python
+from blackboard.merging import merge_states, StateMerger, MergeStrategy
+
+# Simple merge - child wins on conflicts
+result = merge_states(parent_state, child_state, strategy=MergeStrategy.THEIRS)
+
+# Sequential merging of multiple children
+merger = StateMerger(parent_state, strategy=MergeStrategy.THEIRS)
+for child in sub_agent_results:
+    merger.merge(child)
+
+final_state = merger.get_merged_state()
+```
+
+### Context Scoping
+
+Filter artifacts/feedback for sub-agents:
+
+```python
+# Only show code artifacts to sub-agent
+context = state.to_context_string(
+    artifact_filter=lambda a: a.type == "code",
+    feedback_filter=lambda f: not f.passed  # Only failed feedback
+)
+```
+
+---
+
 ## Interactive TUI
 
 A Textual-based Mission Control dashboard for real-time debugging:
@@ -688,7 +770,7 @@ from blackboard.ui import create_tui, is_headless
 
 async def main():
     orchestrator = Orchestrator(...)
-    
+
     if is_headless():
         await orchestrator.run(goal="...")
     else:
@@ -698,12 +780,12 @@ async def main():
 
 ### Key Bindings
 
-| Key | Action |
-|-----|--------|
-| `Space` | Pause/Resume execution |
-| `I` | Inject intervention command |
-| `Q` | Quit |
-| `Tab` | Switch panels |
+| Key     | Action                      |
+| ------- | --------------------------- |
+| `Space` | Pause/Resume execution      |
+| `I`     | Inject intervention command |
+| `Q`     | Quit                        |
+| `Tab`   | Switch panels               |
 
 ### Panels
 
@@ -933,12 +1015,12 @@ blackboard serve my_app:create_orchestrator --port 8000
 
 ### API Endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/runs` | POST | Start a new run |
-| `/runs/{id}` | GET | Get run status |
-| `/runs/{id}/stream` | GET | SSE event stream |
-| `/runs/{id}/resume` | POST | Resume paused run |
+| Endpoint            | Method | Description       |
+| ------------------- | ------ | ----------------- |
+| `/runs`             | POST   | Start a new run   |
+| `/runs/{id}`        | GET    | Get run status    |
+| `/runs/{id}/stream` | GET    | SSE event stream  |
+| `/runs/{id}/resume` | POST   | Resume paused run |
 
 ---
 

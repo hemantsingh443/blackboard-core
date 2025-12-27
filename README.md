@@ -31,33 +31,45 @@ Blackboard-Core provides a **centralized state architecture** for multi-agent AI
 ## Features
 
 **Core**
+
 - **Centralized State** - All agents share a typed Pydantic state model
 - **LLM Orchestration** - A supervisor LLM decides which worker runs next
 - **Magic Decorators** - Define workers with simple typed functions
 - **Async-First** - Built for high-performance async/await patterns
 
 **Orchestration**
+
 - **Chain-of-Thought** - Pluggable reasoning strategies
 - **Fractal Agents** - Nest agents as workers with recursion limits
 - **Squad Patterns** - Pre-configured agent factories
 - **Blueprints** - Constrain execution to specific workflows
 
 **Persistence & Memory**
+
 - **SQLite/Postgres** - Production-grade persistence
 - **Time-Travel Debugging** - Fork sessions at any checkpoint
 - **Vector Memory** - Semantic search with pluggable embedders
 
+**Swarm Intelligence (v1.8.0)**
+
+- **Delta Protocol** - Incremental artifact patching with search-replace
+- **Map-Reduce** - Parallel sub-agent execution with conflict resolution
+- **Branch-Merge** - Fork states, work in isolation, merge results
+
 **Developer Experience**
+
 - **Interactive TUI** - Textual-based Mission Control dashboard
 - **CLI Tools** - Project scaffolding and optimization
 - **Session Replay** - Record and replay for debugging
 
 **Production**
+
 - **Runtime Security** - Explicit acknowledgment for code execution
 - **Cost Control** - Budget middleware with LiteLLM pricing
 - **OpenTelemetry** - Distributed tracing
 
 **Ecosystem**
+
 - **LiteLLM Integration** - 100+ LLM providers
 - **LangChain Adapter** - Wrap LangChain tools as Workers
 - **LlamaIndex Adapter** - Wrap QueryEngines as Workers
@@ -105,14 +117,14 @@ print(result.artifacts[-1].content)
 
 ## Core Concepts
 
-| Concept | Description |
-|---------|-------------|
-| **Blackboard** | Shared state containing goal, artifacts, feedback, and metadata |
-| **Worker** | An agent that reads state and produces artifacts or feedback |
-| **Orchestrator** | Manages the control loop and calls the supervisor LLM |
-| **Supervisor** | The LLM that decides which worker to call next |
-| **Artifact** | Versioned output produced by a worker |
-| **Feedback** | Review/critique of an artifact |
+| Concept          | Description                                                     |
+| ---------------- | --------------------------------------------------------------- |
+| **Blackboard**   | Shared state containing goal, artifacts, feedback, and metadata |
+| **Worker**       | An agent that reads state and produces artifacts or feedback    |
+| **Orchestrator** | Manages the control loop and calls the supervisor LLM           |
+| **Supervisor**   | The LLM that decides which worker to call next                  |
+| **Artifact**     | Versioned output produced by a worker                           |
+| **Feedback**     | Review/critique of an artifact                                  |
 
 ## The Magic Decorator
 

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 if TYPE_CHECKING:
     from .state import Artifact, Feedback, Status, Blackboard
+    from .patching import ArtifactMutation
 
 
 class WorkerInput(BaseModel):
@@ -61,10 +62,21 @@ class WorkerOutput:
             artifact=Artifact(type="summary", content="...", creator="ResearchAgent"),
             trace_id="session-123-abc"  # Link to full sub-agent log
         )
+        
+        # Editor returning incremental patches
+        return WorkerOutput(
+            mutations=[
+                ArtifactMutation(
+                    artifact_id="file-abc",
+                    patches=[SearchReplacePatch(search="old_func", replace="new_func")]
+                )
+            ]
+        )
     """
     artifact: Optional["Artifact"] = None
     feedback: Optional["Feedback"] = None
     status_update: Optional["Status"] = None
+    mutations: List["ArtifactMutation"] = field(default_factory=list)  # Delta updates
     metadata: Dict[str, Any] = field(default_factory=dict)
     trace_id: Optional[str] = None  # For fractal agent traceability
 
@@ -83,6 +95,10 @@ class WorkerOutput:
     def has_trace(self) -> bool:
         """Check if this output has a trace link (from sub-agent)."""
         return self.trace_id is not None
+    
+    def has_mutations(self) -> bool:
+        """Check if this output contains artifact mutations."""
+        return len(self.mutations) > 0
 
 
 class Worker(ABC):

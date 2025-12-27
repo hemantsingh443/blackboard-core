@@ -1353,6 +1353,46 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         
         if output.has_status_update():
             state.update_status(output.status_update)
+        
+        # Handle artifact mutations (delta updates)
+        if output.has_mutations():
+            from .patching import apply_patches
+            
+            for mutation in output.mutations:
+                # Find the target artifact
+                target_artifact = state.get_artifact(mutation.artifact_id)
+                
+                if target_artifact is None:
+                    logger.warning(f"Mutation target artifact not found: {mutation.artifact_id}")
+                    state.add_feedback(Feedback(
+                        source=worker_name,
+                        critique=f"Failed to apply mutation: artifact {mutation.artifact_id} not found",
+                        passed=False
+                    ))
+                    continue
+                
+                # Apply patches to the artifact content
+                if not isinstance(target_artifact.content, str):
+                    logger.warning(f"Cannot apply patches to non-string content: {type(target_artifact.content)}")
+                    continue
+                
+                result = apply_patches(target_artifact.content, mutation.patches)
+                
+                if result.success:
+                    # Update artifact content in-place
+                    target_artifact.content = result.content
+                    target_artifact.version += 1
+                    logger.debug(f"Applied {result.applied_count} patches to artifact {mutation.artifact_id[:8]}")
+                else:
+                    # Log failed patches
+                    for patch_idx, error in result.failed_patches:
+                        logger.warning(f"Patch {patch_idx} failed: {error}")
+                    state.add_feedback(Feedback(
+                        source=worker_name,
+                        critique=f"Partial mutation failure: {len(result.failed_patches)} of {len(mutation.patches)} patches failed",
+                        passed=False,
+                        artifact_id=mutation.artifact_id
+                    ))
 
     async def _publish_event(self, event_type: EventType, data: Dict[str, Any]) -> None:
         """Publish an event to the event bus."""
