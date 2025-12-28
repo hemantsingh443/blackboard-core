@@ -6,7 +6,7 @@ from typing import Optional
 from blackboard import Worker, WorkerOutput, Feedback, Blackboard
 from blackboard.protocols import WorkerInput
 import openai
-from demos.blackboard_code.config import MODEL, OPENROUTER_API_KEY, OPENROUTER_HEADERS, MAX_TOKENS
+from ..config import MODEL, OPENROUTER_API_KEY, OPENROUTER_HEADERS, MAX_TOKENS
 
 
 class ReviewerInput(WorkerInput):

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 from blackboard import Worker, WorkerOutput, Artifact, Blackboard
 from blackboard.protocols import WorkerInput
-from demos.blackboard_code.config import SANDBOX_DIR
+from ..config import SANDBOX_DIR
 
 
 class ExecutorInput(WorkerInput):

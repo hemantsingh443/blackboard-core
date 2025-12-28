@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from dotenv import load_dotenv
 
-_project_root = Path(__file__).parent.parent.parent
+_project_root = Path(__file__).resolve().parent.parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
@@ -104,32 +104,185 @@ class SessionContext:
 
 
 # ============================================================
-# Terminal Manager - Multi-terminal support
+# Terminal Manager - VISIBLE Terminal Windows with Smart Allocation
 # ============================================================
 class TerminalManager:
-    """Manages multiple terminal instances with non-blocking I/O."""
+    """
+    Manages VISIBLE terminal windows with smart allocation.
+    - Tracks which terminals are busy (running servers)
+    - Auto-allocates new terminals when needed
+    - Supports named terminals: server, build, main, etc.
+    """
     
     def __init__(self, sandbox: Path, on_output=None):
         self.sandbox = sandbox
-        self.on_output = on_output  # Callback for output
-        self.terminals: Dict[str, dict] = {}  # name -> {proc, task, output}
+        self.on_output = on_output
+        self.terminals: Dict[str, dict] = {}  # name -> {bat_file, log_file, busy, purpose}
         self.command_history: List[dict] = []
+        self.terminal_counter = 0
+        
+        # Create terminal scripts directory
+        self.scripts_dir = sandbox / ".terminals"
+        self.scripts_dir.mkdir(exist_ok=True)
     
-    async def run(self, cmd: str, name: str = "main", timeout: int = 30, 
-                  background: bool = False, cwd: str = None) -> Tuple[bool, str]:
-        """Run a command in a terminal instance."""
+    def get_available_terminal(self, purpose: str = "general") -> str:
+        """
+        Get an available terminal for a task.
+        - If a terminal for this purpose exists and isn't busy, use it
+        - If all terminals are busy, create a new one
+        """
+        # Check for existing terminal with matching purpose that's not busy
+        for name, info in self.terminals.items():
+            if info.get("purpose") == purpose and not info.get("busy"):
+                return name
+        
+        # Check for any non-busy terminal
+        for name, info in self.terminals.items():
+            if not info.get("busy"):
+                return name
+        
+        # All busy, create new one
+        self.terminal_counter += 1
+        new_name = f"{purpose}_{self.terminal_counter}"
+        return new_name
+    
+    def mark_busy(self, name: str, busy: bool = True, purpose: str = None):
+        """Mark a terminal as busy (running a server or long task)."""
+        if name in self.terminals:
+            self.terminals[name]["busy"] = busy
+            if purpose:
+                self.terminals[name]["purpose"] = purpose
+    
+    def is_busy(self, name: str) -> bool:
+        """Check if a terminal is busy."""
+        if name in self.terminals:
+            return self.terminals[name].get("busy", False)
+        return False
+    
+    def open_terminal(self, name: str = "main", cwd: str = None, purpose: str = "general") -> str:
+        """
+        Open a new visible terminal window.
+        Returns the path to the terminal's command file.
+        """
         work_dir = Path(cwd) if cwd else self.sandbox
         
-        self._emit(f"[#00ffff]━━━ ⚡ TERMINAL [{name}] ━━━[/]")
+        # Create batch file for this terminal
+        bat_file = self.scripts_dir / f"{name}.bat"
+        log_file = self.scripts_dir / f"{name}.log"
+        cmd_file = self.scripts_dir / f"{name}_commands.txt"
+        
+        # Create the terminal batch file
+        terminal_script = f'''@echo off
+title Blackboard [{name.upper()}]
+cd /d "{work_dir}"
+color 0A
+echo ===============================================
+echo   BLACKBOARD TERMINAL: {name.upper()}
+echo   Purpose: {purpose}
+echo   Working Dir: {work_dir}
+echo ===============================================
+echo.
+echo Type commands or wait for AI to send them...
+echo.
+
+:loop
+if exist "{cmd_file}" (
+    echo.
+    echo --- AI Command ---
+    for /f "delims=" %%a in ({cmd_file}) do (
+        echo ^> %%a
+        call %%a
+        echo.
+    )
+    del "{cmd_file}" 2>nul
+    echo --- Done ---
+    echo.
+)
+timeout /t 2 /nobreak >nul
+goto loop
+'''
+        
+        bat_file.write_text(terminal_script, encoding="utf-8")
+        
+        # Store terminal info
+        self.terminals[name] = {
+            "bat_file": str(bat_file),
+            "log_file": str(log_file),
+            "cmd_file": str(cmd_file),
+            "cwd": str(work_dir),
+            "busy": False,
+            "purpose": purpose
+        }
+        
+        # Launch the terminal
+        if sys.platform == "win32":
+            try:
+                os.system(f'start wt -d "{work_dir}" cmd /k "{bat_file}"')
+            except:
+                os.system(f'start cmd /k "{bat_file}"')
+        else:
+            os.system(f'gnome-terminal -- bash -c "cd {work_dir} && bash"')
+        
+        self._emit(f"[green]✓ Opened terminal [{name}] ({purpose})[/]")
+        self._emit(f"[dim]  Working dir: {work_dir}[/]")
+        
+        return name
+    
+    def send_command(self, cmd: str, name: str = None, is_server: bool = False) -> str:
+        """
+        Send a command to a terminal window.
+        Returns the terminal name used.
+        """
+        # Auto-select terminal if not specified
+        if name is None:
+            if is_server:
+                name = self.get_available_terminal("server")
+            else:
+                name = self.get_available_terminal("build")
+        
+        if name not in self.terminals:
+            purpose = "server" if is_server else "general"
+            self.open_terminal(name, purpose=purpose)
+        
+        cmd_file = Path(self.terminals[name]["cmd_file"])
+        
+        # Write command to file
+        with open(cmd_file, "a", encoding="utf-8") as f:
+            f.write(cmd + "\n")
+        
+        self._emit(f"[cyan]→ [{name}] $ {cmd}[/]")
+        
+        # Mark as busy if it's a server command
+        if is_server:
+            self.mark_busy(name, True, "server")
+            self._emit(f"[dim]  Terminal [{name}] marked as busy (server)[/]")
+        
+        self.command_history.append({
+            "cmd": cmd, 
+            "name": name, 
+            "time": datetime.now().isoformat(),
+            "is_server": is_server
+        })
+        
+        return name
+    
+    def send_commands(self, cmds: List[str], name: str = None) -> str:
+        """Send multiple commands to a terminal."""
+        used_name = None
+        for cmd in cmds:
+            used_name = self.send_command(cmd, name)
+        return used_name
+    
+    async def run_and_wait(self, cmd: str, timeout: int = 60) -> Tuple[bool, str]:
+        """
+        Run a command in hidden mode and wait for result.
+        Use this for quick commands where we need the output.
+        """
+        cwd = self.sandbox
+        
+        self._emit(f"[#00ffff]━━━ ⚡ QUICK RUN ━━━[/]")
         self._emit(f"  $ {cmd}")
         
-        if background:
-            return await self._run_background(cmd, name, work_dir)
-        else:
-            return await self._run_blocking(cmd, name, work_dir, timeout)
-    
-    async def _run_blocking(self, cmd: str, name: str, cwd: Path, timeout: int) -> Tuple[bool, str]:
-        """Run command and wait for completion."""
         try:
             proc = await asyncio.create_subprocess_shell(
                 cmd, cwd=str(cwd),
@@ -137,15 +290,8 @@ class TerminalManager:
                 stderr=asyncio.subprocess.PIPE
             )
             
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
-                output = stdout.decode() + stderr.decode()
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                self._emit(f"[yellow]  ⏱ Timeout ({timeout}s)[/]")
-                return False, "Timeout"
-            
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+            output = stdout.decode() + stderr.decode()
             ok = proc.returncode == 0
             
             if output.strip():
@@ -154,104 +300,29 @@ class TerminalManager:
             
             self._emit(f"[{'green' if ok else 'red'}]  {'✓' if ok else '✗'} Exit: {proc.returncode}[/]")
             
-            self.command_history.append({
-                "cmd": cmd, "name": name, "ok": ok, 
-                "output": output[:500], "time": datetime.now().isoformat()
-            })
-            
             return ok, output
             
+        except asyncio.TimeoutError:
+            self._emit(f"[yellow]  ⏱ Timeout ({timeout}s)[/]")
+            return False, "Timeout"
         except Exception as e:
             self._emit(f"[red]  Error: {e}[/]")
             return False, str(e)
-    
-    async def _run_background(self, cmd: str, name: str, cwd: Path) -> Tuple[bool, str]:
-        """Start a background process (server, watcher, etc.)."""
-        if name in self.terminals:
-            await self.stop(name)
-        
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                cmd, cwd=str(cwd),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            self.terminals[name] = {
-                "proc": proc,
-                "cmd": cmd,
-                "output": [],
-                "started": datetime.now().isoformat()
-            }
-            
-            # Start output reader
-            asyncio.create_task(self._read_output(name))
-            
-            self._emit(f"[green]  ✓ Started in background (PID: {proc.pid})[/]")
-            
-            # Wait a bit to see if it crashes immediately
-            await asyncio.sleep(1)
-            if proc.returncode is not None:
-                return False, "Process exited immediately"
-            
-            return True, f"Running in background as [{name}]"
-            
-        except Exception as e:
-            self._emit(f"[red]  Error: {e}[/]")
-            return False, str(e)
-    
-    async def _read_output(self, name: str):
-        """Read output from background process."""
-        if name not in self.terminals:
-            return
-        
-        proc = self.terminals[name]["proc"]
-        
-        try:
-            async for line in proc.stdout:
-                text = line.decode().rstrip()
-                self.terminals[name]["output"].append(text)
-                # Keep last 100 lines
-                if len(self.terminals[name]["output"]) > 100:
-                    self.terminals[name]["output"] = self.terminals[name]["output"][-100:]
-        except:
-            pass
-    
-    async def stop(self, name: str) -> bool:
-        """Stop a background process."""
-        if name not in self.terminals:
-            return False
-        
-        proc = self.terminals[name]["proc"]
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), 5)
-            except asyncio.TimeoutError:
-                proc.kill()
-        
-        del self.terminals[name]
-        self._emit(f"[yellow]  ⊘ Stopped [{name}][/]")
-        return True
-    
-    async def stop_all(self):
-        """Stop all background processes."""
-        for name in list(self.terminals.keys()):
-            await self.stop(name)
-    
-    def get_output(self, name: str, lines: int = 20) -> str:
-        """Get recent output from a terminal."""
-        if name not in self.terminals:
-            return ""
-        return "\n".join(self.terminals[name]["output"][-lines:])
     
     def list_terminals(self) -> List[str]:
-        """List active terminals."""
+        """List open terminals."""
         return list(self.terminals.keys())
     
-    def get_history(self, last_n: int = 5) -> List[dict]:
-        """Get recent command history."""
-        return self.command_history[-last_n:]
+    def get_status(self) -> Dict[str, dict]:
+        """Get status of all terminals."""
+        return {name: {"busy": info.get("busy", False), "purpose": info.get("purpose", "general")}
+                for name, info in self.terminals.items()}
+    
+    def get_cwd(self, name: str = "main") -> str:
+        """Get working directory of a terminal."""
+        if name in self.terminals:
+            return self.terminals[name]["cwd"]
+        return str(self.sandbox)
     
     def _emit(self, text: str):
         if self.on_output:
@@ -274,7 +345,7 @@ def main():
     from rich import box
     from rich.markup import escape
     
-    from demos.blackboard_code.config import (
+    from examples.demos.blackboard_code.config import (
         OPENROUTER_API_KEY, MODEL, MAX_TOKENS, OPENROUTER_HEADERS
     )
     
@@ -594,29 +665,37 @@ Output ONLY the corrected code."""
         nonlocal term_mgr
         term_mgr = TerminalManager(sandbox, on_output=lambda t: out(t))
     
-    async def runner(cmd: str, terminal: str = "main", background: bool = False, 
-                     max_retries: int = 2) -> Tuple[bool, str]:
-        """
-        Smart runner with multi-terminal support and autonomous error recovery.
+    async def open_terminal_window(name: str = "main") -> bool:
+        """Open a visible terminal window for user interaction."""
+        if not term_mgr:
+            init_terminal_manager()
         
-        Args:
-            cmd: Command to run
-            terminal: Terminal instance name (e.g., "backend", "frontend")
-            background: If True, run as background process (for servers)
-            max_retries: Number of auto-fix attempts on failure
+        agents({"runner": "working"})
+        term_mgr.open_terminal(name)
+        agents({"runner": "done"})
+        return True
+    
+    async def run_in_terminal(cmd: str, terminal: str = "main") -> bool:
+        """
+        Send a command to a visible terminal window.
+        The user can see the command execute in real-time.
+        Auto-allocates a new terminal if current one is busy.
         """
         if not term_mgr:
             init_terminal_manager()
         
         agents({"runner": "working"})
         
-        # Smart command adaptation using LLM
-        files_list = list(ctx.files.keys())
+        # Check if this is a server command
+        is_server = any(x in cmd.lower() for x in [
+            "flask run", "npm start", "npm run", "python -m http",
+            "uvicorn", "gunicorn", "python app", "python main", "runserver"
+        ])
         
-        # Quick heuristics for common patterns
+        # Adapt command for file paths
+        files_list = list(ctx.files.keys())
         adapted_cmd = cmd
         
-        # Find correct paths for requirements.txt, scripts, etc.
         if "requirements" in cmd.lower() and "-r" in cmd:
             for f in files_list:
                 if "requirements" in f.lower() and f.endswith(".txt"):
@@ -624,204 +703,363 @@ Output ONLY the corrected code."""
                     out(f"[dim]  → Using: {f}[/]")
                     break
         
-        # For python/flask/npm commands, detect if we need to cd first
-        working_dir = None
-        if any(x in cmd.lower() for x in ["python", "flask", "npm", "node"]):
-            # Find common subdirectories
-            for f in files_list:
-                if "/" in f:
-                    subdir = f.split("/")[0]
-                    if subdir in ["backend", "frontend", "server", "client", "api", "app"]:
-                        working_dir = str(sandbox / subdir)
-                        out(f"[dim]  → Working dir: {subdir}/[/]")
-                        break
+        # Auto-select terminal (will pick available one or create new)
+        used_terminal = term_mgr.send_command(adapted_cmd, name=terminal if terminal else None, is_server=is_server)
         
-        # Detect if this is a server command (should be background)
-        is_server = any(x in cmd.lower() for x in [
-            "flask run", "python app", "python main", "npm start", 
-            "npm run dev", "python -m http.server", "uvicorn", "gunicorn"
-        ])
-        if is_server and not background:
-            out(f"[dim]  → Detected server command, running in background[/]")
-            background = True
+        agents({"runner": "done"})
+        return used_terminal
+    
+    async def run_quick(cmd: str, timeout: int = 60) -> Tuple[bool, str]:
+        """
+        Run a command silently and return the output.
+        Use for commands where AI needs to see the result (pip, npm install, etc).
+        """
+        if not term_mgr:
+            init_terminal_manager()
         
-        # Run with retry logic
-        retries = 0
-        last_output = ""
-        current_cmd = adapted_cmd
+        agents({"runner": "working"})
+        ok, output = await term_mgr.run_and_wait(cmd, timeout=timeout)
         
-        while retries <= max_retries:
-            ok, output = await term_mgr.run(
-                current_cmd, 
-                name=terminal, 
-                background=background,
-                cwd=working_dir,
-                timeout=30 if not background else 0
-            )
-            last_output = output
+        # Auto-fix on failure
+        if not ok:
+            out(f"[yellow]  🔧 Command failed, attempting fix...[/]")
             
-            if ok:
-                agents({"runner": "done"})
-                return True, output
-            
-            # If background command that's still running, consider it success
-            if background and terminal in term_mgr.list_terminals():
-                agents({"runner": "done"})
-                return True, "Running in background"
-            
-            # Auto-fix on failure
-            if retries < max_retries and not background:
-                out(f"[yellow]  🔧 Auto-fix attempt ({retries + 1}/{max_retries})...[/]")
-                
-                fix_prompt = f"""Command failed:
-$ {current_cmd}
+            fix_prompt = f"""Command failed:
+$ {cmd}
 
-Error: {output[:600]}
+Error: {output[:500]}
 
-Available files: {', '.join(files_list[:15])}
-Working directory: {working_dir or sandbox}
+Files: {', '.join(list(ctx.files.keys())[:10])}
 OS: {sys.platform}
 
-What is the corrected command? Consider:
-- File paths (check if files exist in subdirectories)
-- Missing dependencies (pip install, npm install)
-- Environment variables
-- Windows vs Unix syntax
-
-Reply with ONLY the corrected command."""
-                
-                new_cmd = await llm_call(fix_prompt, "You fix shell commands. Output only the command.")
-                new_cmd = new_cmd.strip().strip("`").split("\n")[0]
-                
-                if new_cmd and new_cmd != current_cmd and len(new_cmd) < 200:
-                    out(f"[cyan]  → Trying: {new_cmd}[/]")
-                    current_cmd = new_cmd
-                    retries += 1
-                else:
-                    break
-            else:
-                break
+What is the corrected command? Reply with ONLY the command."""
+            
+            new_cmd = await llm_call(fix_prompt, "You fix commands.")
+            new_cmd = new_cmd.strip().strip("`").split("\n")[0]
+            
+            if new_cmd and new_cmd != cmd and len(new_cmd) < 200:
+                out(f"[cyan]  → Retrying: {new_cmd}[/]")
+                ok, output = await term_mgr.run_and_wait(new_cmd, timeout=timeout)
         
-        # Store failure in context
-        ctx.add_message("system", f"Command failed: {current_cmd}\nOutput: {last_output[:400]}")
         agents({"runner": "done"})
-        return False, last_output
+        return ok, output
     
-    async def stop_terminal(name: str) -> bool:
-        """Stop a background terminal process."""
-        if term_mgr:
-            return await term_mgr.stop(name)
-        return False
+    async def runner(cmd: str, terminal: str = None) -> Tuple[bool, str]:
+        """
+        Smart runner - auto-allocates terminals, detects server commands.
+        
+        Args:
+            cmd: Command to run
+            terminal: Optional terminal name (auto-allocated if None)
+        """
+        # Detect if this is a server/long-running command
+        is_server = any(x in cmd.lower() for x in [
+            "flask run", "npm start", "npm run", "python -m http",
+            "uvicorn", "gunicorn", "node server", "python app",
+            "python main", "python manage.py runserver"
+        ])
+        
+        # Quick commands run silently, everything else in visible terminal
+        quick_commands = ["pip install", "npm install", "python -m venv", "mkdir", "cd ", "ls", "dir"]
+        is_quick = any(x in cmd.lower() for x in quick_commands) and not is_server
+        
+        if is_quick:
+            return await run_quick(cmd)
+        else:
+            used_terminal = await run_in_terminal(cmd, terminal)
+            return True, f"Command sent to terminal [{used_terminal}]"
     
-    async def get_terminal_output(name: str, lines: int = 20) -> str:
-        """Get recent output from a terminal."""
-        if term_mgr:
-            return term_mgr.get_output(name, lines)
-        return ""
-    
-    async def cleanup_terminals():
-        """Stop all terminals on exit."""
-        if term_mgr:
-            await term_mgr.stop_all()
+    async def setup_project_terminals():
+        """
+        Open terminals for a typical project structure.
+        """
+        if not term_mgr:
+            init_terminal_manager()
+        
+        # Check project structure
+        has_backend = any("backend" in f or "server" in f or "api" in f for f in ctx.files)
+        has_frontend = any("frontend" in f or "client" in f for f in ctx.files)
+        
+        if has_backend and has_frontend:
+            out("[dim]Opening terminals for frontend + backend...[/]")
+            term_mgr.open_terminal("backend", str(sandbox / "backend") if (sandbox / "backend").exists() else str(sandbox))
+            await asyncio.sleep(0.5)
+            term_mgr.open_terminal("frontend", str(sandbox / "frontend") if (sandbox / "frontend").exists() else str(sandbox))
+        else:
+            term_mgr.open_terminal("main")
 
     
     # ========================================
     # Orchestrator
     # ========================================
+    async def classify_intent(user_input: str) -> Tuple[str, str]:
+        """
+        Use LLM to classify what the user wants to do.
+        Returns (intent, details) where intent is one of:
+        - PLAN: Need to create a new project/feature
+        - RUN: Execute the application
+        - FIX: Fix an issue with existing code
+        - EDIT: Modify existing file
+        - EXPLAIN: Answer a question
+        - COMMAND: Run a specific shell command
+        - CONTINUE: Continue previous work
+        """
+        context_info = ""
+        if ctx.files:
+            context_info = f"\nExisting project files: {list(ctx.files.keys())}"
+            if ctx.plan:
+                context_info += f"\nPrevious plan exists: {len(ctx.plan_steps)} steps, {ctx.get_progress()}"
+        
+        prompt = f"""Classify this user request:
+"{user_input}"
+{context_info}
+
+What does the user want? Reply with ONE of these formats:
+- PLAN: <description> - if they want to BUILD something new (app, feature, project)
+- RUN: <file_or_command> - if they want to START/RUN/LAUNCH the application
+- FIX: <filename> - if they want to FIX a bug or error in a specific file
+- EDIT: <filename> <what_to_change> - if they want to MODIFY/CHANGE/ADD to existing code
+- COMMAND: <shell_command> - if they want to run a SPECIFIC command (pip, npm, etc)
+- EXPLAIN: <topic> - if they're asking a QUESTION or need explanation
+- CONTINUE: - if they want to resume previous unfinished work
+
+Reply with ONLY the classification, nothing else."""
+
+        response = await llm_call(prompt, "You classify user intents accurately. Be concise.")
+        response = response.strip()
+        
+        # Parse response
+        if ":" in response:
+            parts = response.split(":", 1)
+            intent = parts[0].strip().upper()
+            details = parts[1].strip() if len(parts) > 1 else ""
+        else:
+            intent = response.upper()
+            details = ""
+        
+        return intent, details
+    
     async def orchestrate(user_input: str):
         nonlocal approval_result
         
         ctx.add_message("user", user_input)
         out(f"\n[white bold]👤 You:[/] {escape(user_input)}\n")
         
-        # Check if this is about an error/issue with current work
-        error_keywords = ["error", "fail", "not work", "issue", "problem", "wrong", "couldn't", "could not", "can't", "cannot"]
-        is_error_followup = any(kw in user_input.lower() for kw in error_keywords) and ctx.files
+        # Classify intent using LLM
+        out(f"[#9966ff]🎯 ORCHESTRATOR: Analyzing request...[/]")
+        intent, details = await classify_intent(user_input)
+        out(f"[dim]  Intent: {intent} → {details[:50] if details else '(none)'}[/]")
         
-        if is_error_followup:
-            out(f"[#9966ff]🎯 ORCHESTRATOR: Analyzing the issue...[/]")
-            
-            # Get recent errors from context
-            recent_errors = [m for m in ctx.conversation if m.get("role") == "system" and "failed" in m.get("content", "").lower()]
-            error_context = recent_errors[-1]["content"] if recent_errors else ""
-            
-            # Ask LLM how to fix
-            context = ctx.get_context_for_llm()
-            fix_prompt = f"""{context}
-
-User reports: {user_input}
-
-Recent error: {error_context}
-
-Files we have: {list(ctx.files.keys())}
-
-What should we do to fix this? Reply with one of:
-1. RUN: <command> - if we need to run a specific command
-2. FIX: <filename> - if we need to modify a file
-3. CREATE: <filename> - if we need to create a new file
-4. EXPLAIN: <explanation> - if we just need to explain something"""
-            
-            response = await llm_call(fix_prompt, "You diagnose and fix project issues.")
-            out(f"[dim]{escape(response[:200])}[/]")
-            
-            if response.startswith("RUN:"):
-                cmd = response.replace("RUN:", "").strip()
-                approved = await ask_approval(f"Run: {cmd}?")
-                if approved:
-                    await runner(cmd)
-            elif response.startswith("FIX:"):
-                filename = response.replace("FIX:", "").strip().split()[0]
-                if filename in ctx.files:
-                    # Get the file and fix it
-                    code = ctx.files[filename]
-                    fixed = await fixer(filename, code, user_input)
-                    approved = await ask_approval(f"Update {filename}?")
-                    if approved:
-                        ctx.save_file(filename, fixed, sandbox)
-                        out(f"[green]✓ Updated {filename}[/]")
-            else:
-                out(f"[dim]{escape(response)}[/]")
-            
-            return
+        # Route to appropriate agent based on intent
+        if intent == "RUN":
+            await handle_run(details)
+        elif intent == "FIX":
+            await handle_fix(details, user_input)
+        elif intent == "EDIT":
+            await handle_edit(details, user_input)
+        elif intent == "COMMAND":
+            await handle_command(details)
+        elif intent == "EXPLAIN":
+            await handle_explain(user_input)
+        elif intent == "CONTINUE":
+            await handle_continue()
+        else:  # PLAN or unknown
+            await handle_plan(user_input)
+    
+    async def handle_run(details: str):
+        """Handle RUN intent - start the application."""
+        out(f"[#9966ff]🎯 ORCHESTRATOR: Running application...[/]")
         
-        # Check if continuing previous work
-        if ctx.phase == "complete" or (ctx.plan_approved and ctx.files):
-            out(f"[#9966ff]🎯 ORCHESTRATOR: Continuing from previous work...[/]")
-            out(f"[dim]{ctx.get_progress()}[/]")
+        run_cmd = None
+        
+        # If details specifies a file, use it
+        if details and details.endswith(".py"):
+            run_cmd = f"python {details}"
+        elif details and details.endswith(".js"):
+            run_cmd = f"node {details}"
+        
+        # Auto-detect from project files
+        if not run_cmd and ctx.files:
+            # Flask
+            for fname, content in ctx.files.items():
+                if fname.endswith(".py") and ("Flask(" in content or "from flask" in content.lower()):
+                    if "app.run" in content or "__main__" in content:
+                        run_cmd = f"python {fname}"
+                        break
             
-            if "continue" in user_input.lower():
-                if ctx.current_step < len(ctx.plan_steps):
-                    out(f"[dim]Resuming from step {ctx.current_step + 1}[/]")
-                    await execute_remaining()
-                    return
-            else:
-                # Modification request - keep existing files
-                ctx.goal = user_input
-                ctx.plan = None
-                ctx.plan_approved = False
-                ctx.current_step = 0
+            # Django
+            if not run_cmd and "manage.py" in ctx.files:
+                run_cmd = "python manage.py runserver"
+            
+            # Node
+            if not run_cmd and "package.json" in ctx.files:
+                run_cmd = "npm start"
+            
+            # Generic Python
+            if not run_cmd:
+                for fname in ["app.py", "main.py", "server.py", "run.py"]:
+                    if fname in ctx.files:
+                        run_cmd = f"python {fname}"
+                        break
+        
+        if run_cmd:
+            out(f"[dim]  Command: {run_cmd}[/]")
+            approved = await ask_approval(f"Run: {run_cmd}?")
+            if approved:
+                await run_in_terminal(run_cmd)
+                out(f"[green]✓ Started in terminal[/]")
         else:
-            ctx.goal = user_input
+            out(f"[yellow]Could not detect run command. Files: {list(ctx.files.keys())}[/]")
+    
+    async def handle_fix(details: str, user_input: str):
+        """Handle FIX intent - fix a bug in code."""
+        out(f"[#9966ff]🎯 ORCHESTRATOR: Fixing issue...[/]")
         
-        # Planning
+        # Find the file to fix
+        target_file = details.strip()
+        if target_file not in ctx.files:
+            # Try to find it
+            for fname in ctx.files:
+                if target_file in fname or fname in target_file:
+                    target_file = fname
+                    break
+        
+        if target_file in ctx.files:
+            code = ctx.files[target_file]
+            fixed = await fixer(target_file, code, user_input)
+            approved = await ask_approval(f"Update {target_file}?")
+            if approved:
+                ctx.save_file(target_file, fixed, sandbox)
+                out(f"[green]✓ Fixed {target_file}[/]")
+        else:
+            out(f"[yellow]File not found: {target_file}[/]")
+            out(f"[dim]Available: {list(ctx.files.keys())}[/]")
+    
+    async def handle_edit(details: str, user_input: str):
+        """Handle EDIT intent - modify existing code."""
+        out(f"[#9966ff]🎯 ORCHESTRATOR: Editing code...[/]")
+        
+        # Parse filename from details
+        parts = details.split(maxsplit=1)
+        target_file = parts[0] if parts else ""
+        edit_desc = parts[1] if len(parts) > 1 else user_input
+        
+        if target_file not in ctx.files:
+            for fname in ctx.files:
+                if target_file in fname:
+                    target_file = fname
+                    break
+        
+        if target_file in ctx.files:
+            code = ctx.files[target_file]
+            # Use coder to regenerate with modifications
+            new_code = await coder(target_file, f"Modify existing code: {edit_desc}")
+            
+            out_diff(target_file, code, new_code)
+            approved = await ask_approval(f"Update {target_file}?")
+            if approved:
+                ctx.save_file(target_file, new_code, sandbox)
+                out(f"[green]✓ Updated {target_file}[/]")
+        else:
+            out(f"[yellow]File not found, creating new...[/]")
+            await handle_plan(user_input)
+    
+    async def handle_command(cmd: str):
+        """Handle COMMAND intent - run shell command."""
+        out(f"[#9966ff]🎯 ORCHESTRATOR: Running command...[/]")
+        
+        approved = await ask_approval(f"Run: {cmd}?")
+        if approved:
+            await run_in_terminal(cmd)
+    
+    async def handle_explain(question: str):
+        """Handle EXPLAIN intent - answer a question."""
+        out(f"[#9966ff]🎯 ORCHESTRATOR: Answering question...[/]")
+        
+        context = ctx.get_context_for_llm() if ctx.files else ""
+        prompt = f"""{context}
+
+User question: {question}
+
+Provide a helpful, concise answer."""
+        
+        response = await llm_call(prompt, "You are a helpful coding assistant.")
+        out_md(response)
+    
+    async def handle_continue():
+        """Handle CONTINUE intent - resume previous work."""
+        out(f"[#9966ff]🎯 ORCHESTRATOR: Continuing previous work...[/]")
+        out(f"[dim]{ctx.get_progress()}[/]")
+        
+        if ctx.current_step < len(ctx.plan_steps):
+            await execute_remaining()
+        else:
+            out("[yellow]No pending work to continue[/]")
+    
+    async def handle_plan(goal: str):
+        """Handle PLAN intent - create new project/feature."""
+        ctx.goal = goal
         ctx.phase = "planning"
-        out(f"\n[#9966ff]🎯 ORCHESTRATOR: Starting planning...[/]\n")
+        
+        out(f"\n[#9966ff]🎯 ORCHESTRATOR: Creating plan...[/]\n")
         
         await planner()
         
-        # Approval
         ctx.phase = "awaiting_approval"
         approved = await ask_approval(f"Approve plan? ({len(ctx.plan_steps)} steps)")
         
         if approved:
             ctx.plan_approved = True
             out("[green]✓ Plan approved[/]\n")
-            await execute_remaining()
+            await execute_with_decisions()
         else:
             out("[yellow]Plan rejected[/]")
             ctx.phase = "idle"
+
     
-    async def execute_remaining():
+    async def decide_next_step() -> Tuple[str, str]:
+        """
+        After each step, let orchestrator decide what to do next.
+        Returns (action, details) where action is:
+        - NEXT: proceed to next planned step
+        - RUN: run a command
+        - FIX: fix an issue
+        - DONE: we're finished
+        - ASK: need user input
+        """
+        context = ctx.get_context_for_llm()
+        terminals_status = term_mgr.get_status() if term_mgr else {}
+        
+        prompt = f"""{context}
+
+Current terminals: {terminals_status}
+
+We just completed step {ctx.current_step} of {len(ctx.plan_steps)}.
+
+What should we do next? Consider:
+- Are there more files to create?
+- Do we need to install dependencies (pip/npm)?
+- Should we run the application?
+- Is anything broken that needs fixing?
+
+Reply with ONE of:
+- NEXT: [reason] - continue with next planned step
+- RUN: [command] - run a specific command now
+- DONE: [summary] - we're finished
+- ASK: [question] - need to ask user something
+
+Reply with ONLY the action."""
+
+        response = await llm_call(prompt, "You orchestrate software development. Be decisive.")
+        response = response.strip()
+        
+        if ":" in response:
+            parts = response.split(":", 1)
+            return parts[0].strip().upper(), parts[1].strip()
+        return response.upper(), ""
+    
+    async def execute_with_decisions():
+        """Execute plan with dynamic decision-making after each step."""
         ctx.phase = "executing"
         
         while ctx.current_step < len(ctx.plan_steps):
@@ -873,6 +1111,25 @@ What should we do to fix this? Reply with one of:
                 step["done"] = True
             
             ctx.current_step += 1
+            
+            # DYNAMIC DECISION: After each step, decide what to do next
+            if ctx.current_step < len(ctx.plan_steps):
+                out(f"\n[#9966ff]🎯 ORCHESTRATOR: Deciding next action...[/]")
+                action, details = await decide_next_step()
+                out(f"[dim]  Decision: {action} → {details[:40] if details else ''}[/]")
+                
+                if action == "RUN":
+                    # Execute a command that wasn't in the original plan
+                    approved = await ask_approval(f"Run: {details}?")
+                    if approved:
+                        await runner(details)
+                elif action == "DONE":
+                    out(f"[green]✓ Orchestrator decided we're done: {details}[/]")
+                    break
+                elif action == "ASK":
+                    out(f"[yellow]Orchestrator needs input: {details}[/]")
+                    # Could implement user prompt here
+                # NEXT continues automatically
         
         ctx.phase = "complete"
         out(f"\n[green bold]✅ COMPLETE! Created {len(ctx.files)} files.[/]")

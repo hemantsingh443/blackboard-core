@@ -2,7 +2,7 @@
 Blackboard Code - Multi-Agent IDE Demo
 """
 
-from demos.blackboard_code.workers import (
+from examples.demos.blackboard_code.workers import (
     PlannerWorker,
     CoderWorker,
     ReviewerWorker,

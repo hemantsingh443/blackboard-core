@@ -5,7 +5,7 @@ Planner Worker - Analyzes tasks and creates execution plans.
 from blackboard import Worker, WorkerOutput, Artifact, Blackboard
 from blackboard.protocols import WorkerInput
 import openai
-from demos.blackboard_code.config import MODEL, OPENROUTER_API_KEY, OPENROUTER_HEADERS, MAX_TOKENS
+from ..config import MODEL, OPENROUTER_API_KEY, OPENROUTER_HEADERS, MAX_TOKENS
 
 
 class PlannerInput(WorkerInput):
