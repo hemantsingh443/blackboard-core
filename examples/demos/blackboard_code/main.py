@@ -104,62 +104,25 @@ class SessionContext:
 
 
 # ============================================================
-# Terminal Manager - VISIBLE Terminal Windows with Smart Allocation
+# Terminal Manager - VISIBLE Terminal Windows
 # ============================================================
 class TerminalManager:
     """
-    Manages VISIBLE terminal windows with smart allocation.
-    - Tracks which terminals are busy (running servers)
-    - Auto-allocates new terminals when needed
-    - Supports named terminals: server, build, main, etc.
+    Manages VISIBLE terminal windows that both AI and user can access.
+    Spawns actual cmd.exe/Windows Terminal windows.
     """
     
     def __init__(self, sandbox: Path, on_output=None):
         self.sandbox = sandbox
         self.on_output = on_output
-        self.terminals: Dict[str, dict] = {}  # name -> {bat_file, log_file, busy, purpose}
+        self.terminals: Dict[str, dict] = {}  # name -> {bat_file, log_file}
         self.command_history: List[dict] = []
-        self.terminal_counter = 0
         
         # Create terminal scripts directory
         self.scripts_dir = sandbox / ".terminals"
         self.scripts_dir.mkdir(exist_ok=True)
     
-    def get_available_terminal(self, purpose: str = "general") -> str:
-        """
-        Get an available terminal for a task.
-        - If a terminal for this purpose exists and isn't busy, use it
-        - If all terminals are busy, create a new one
-        """
-        # Check for existing terminal with matching purpose that's not busy
-        for name, info in self.terminals.items():
-            if info.get("purpose") == purpose and not info.get("busy"):
-                return name
-        
-        # Check for any non-busy terminal
-        for name, info in self.terminals.items():
-            if not info.get("busy"):
-                return name
-        
-        # All busy, create new one
-        self.terminal_counter += 1
-        new_name = f"{purpose}_{self.terminal_counter}"
-        return new_name
-    
-    def mark_busy(self, name: str, busy: bool = True, purpose: str = None):
-        """Mark a terminal as busy (running a server or long task)."""
-        if name in self.terminals:
-            self.terminals[name]["busy"] = busy
-            if purpose:
-                self.terminals[name]["purpose"] = purpose
-    
-    def is_busy(self, name: str) -> bool:
-        """Check if a terminal is busy."""
-        if name in self.terminals:
-            return self.terminals[name].get("busy", False)
-        return False
-    
-    def open_terminal(self, name: str = "main", cwd: str = None, purpose: str = "general") -> str:
+    def open_terminal(self, name: str = "main", cwd: str = None) -> str:
         """
         Open a new visible terminal window.
         Returns the path to the terminal's command file.
@@ -173,22 +136,23 @@ class TerminalManager:
         
         # Create the terminal batch file
         terminal_script = f'''@echo off
-title Blackboard [{name.upper()}]
+title Blackboard Terminal [{name}]
 cd /d "{work_dir}"
 color 0A
 echo ===============================================
 echo   BLACKBOARD TERMINAL: {name.upper()}
-echo   Purpose: {purpose}
 echo   Working Dir: {work_dir}
 echo ===============================================
 echo.
 echo Type commands or wait for AI to send them...
+echo Commands will be read from: {cmd_file}
+echo Output logged to: {log_file}
 echo.
 
 :loop
 if exist "{cmd_file}" (
     echo.
-    echo --- AI Command ---
+    echo --- Executing commands from AI ---
     for /f "delims=" %%a in ({cmd_file}) do (
         echo ^> %%a
         call %%a
@@ -209,13 +173,12 @@ goto loop
             "bat_file": str(bat_file),
             "log_file": str(log_file),
             "cmd_file": str(cmd_file),
-            "cwd": str(work_dir),
-            "busy": False,
-            "purpose": purpose
+            "cwd": str(work_dir)
         }
         
         # Launch the terminal
         if sys.platform == "win32":
+            # Try Windows Terminal first, fallback to cmd
             try:
                 os.system(f'start wt -d "{work_dir}" cmd /k "{bat_file}"')
             except:
@@ -223,64 +186,51 @@ goto loop
         else:
             os.system(f'gnome-terminal -- bash -c "cd {work_dir} && bash"')
         
-        self._emit(f"[green]✓ Opened terminal [{name}] ({purpose})[/]")
+        self._emit(f"[green]✓ Opened terminal window [{name}][/]")
         self._emit(f"[dim]  Working dir: {work_dir}[/]")
         
-        return name
+        return str(bat_file)
     
-    def send_command(self, cmd: str, name: str = None, is_server: bool = False) -> str:
+    def send_command(self, cmd: str, name: str = "main") -> bool:
         """
-        Send a command to a terminal window.
-        Returns the terminal name used.
+        Send a command to a terminal window (will be executed automatically).
         """
-        # Auto-select terminal if not specified
-        if name is None:
-            if is_server:
-                name = self.get_available_terminal("server")
-            else:
-                name = self.get_available_terminal("build")
-        
         if name not in self.terminals:
-            purpose = "server" if is_server else "general"
-            self.open_terminal(name, purpose=purpose)
+            self.open_terminal(name)
         
         cmd_file = Path(self.terminals[name]["cmd_file"])
         
-        # Write command to file
+        # Append command to the command file
         with open(cmd_file, "a", encoding="utf-8") as f:
             f.write(cmd + "\n")
         
         self._emit(f"[cyan]→ [{name}] $ {cmd}[/]")
         
-        # Mark as busy if it's a server command
-        if is_server:
-            self.mark_busy(name, True, "server")
-            self._emit(f"[dim]  Terminal [{name}] marked as busy (server)[/]")
-        
         self.command_history.append({
             "cmd": cmd, 
             "name": name, 
-            "time": datetime.now().isoformat(),
-            "is_server": is_server
+            "time": datetime.now().isoformat()
         })
         
-        return name
+        return True
     
-    def send_commands(self, cmds: List[str], name: str = None) -> str:
+    def send_commands(self, cmds: List[str], name: str = "main") -> bool:
         """Send multiple commands to a terminal."""
-        used_name = None
         for cmd in cmds:
-            used_name = self.send_command(cmd, name)
-        return used_name
+            self.send_command(cmd, name)
+        return True
     
-    async def run_and_wait(self, cmd: str, timeout: int = 60) -> Tuple[bool, str]:
+    async def run_and_wait(self, cmd: str, name: str = "main", timeout: int = 60) -> Tuple[bool, str]:
         """
         Run a command in hidden mode and wait for result.
         Use this for quick commands where we need the output.
         """
-        cwd = self.sandbox
+        if name not in self.terminals:
+            cwd = self.sandbox
+        else:
+            cwd = Path(self.terminals[name]["cwd"])
         
-        self._emit(f"[#00ffff]━━━ ⚡ QUICK RUN ━━━[/]")
+        self._emit(f"[#00ffff]━━━ ⚡ RUN ({name}) ━━━[/]")
         self._emit(f"  $ {cmd}")
         
         try:
@@ -312,11 +262,6 @@ goto loop
     def list_terminals(self) -> List[str]:
         """List open terminals."""
         return list(self.terminals.keys())
-    
-    def get_status(self) -> Dict[str, dict]:
-        """Get status of all terminals."""
-        return {name: {"busy": info.get("busy", False), "purpose": info.get("purpose", "general")}
-                for name, info in self.terminals.items()}
     
     def get_cwd(self, name: str = "main") -> str:
         """Get working directory of a terminal."""
@@ -679,23 +624,21 @@ Output ONLY the corrected code."""
         """
         Send a command to a visible terminal window.
         The user can see the command execute in real-time.
-        Auto-allocates a new terminal if current one is busy.
         """
         if not term_mgr:
             init_terminal_manager()
         
-        agents({"runner": "working"})
+        if terminal not in term_mgr.list_terminals():
+            term_mgr.open_terminal(terminal)
+            await asyncio.sleep(1)  # Wait for terminal to open
         
-        # Check if this is a server command
-        is_server = any(x in cmd.lower() for x in [
-            "flask run", "npm start", "npm run", "python -m http",
-            "uvicorn", "gunicorn", "python app", "python main", "runserver"
-        ])
+        agents({"runner": "working"})
         
         # Adapt command for file paths
         files_list = list(ctx.files.keys())
         adapted_cmd = cmd
         
+        # Fix requirements.txt path
         if "requirements" in cmd.lower() and "-r" in cmd:
             for f in files_list:
                 if "requirements" in f.lower() and f.endswith(".txt"):
@@ -703,16 +646,14 @@ Output ONLY the corrected code."""
                     out(f"[dim]  → Using: {f}[/]")
                     break
         
-        # Auto-select terminal (will pick available one or create new)
-        used_terminal = term_mgr.send_command(adapted_cmd, name=terminal if terminal else None, is_server=is_server)
-        
+        term_mgr.send_command(adapted_cmd, terminal)
         agents({"runner": "done"})
-        return used_terminal
+        return True
     
     async def run_quick(cmd: str, timeout: int = 60) -> Tuple[bool, str]:
         """
         Run a command silently and return the output.
-        Use for commands where AI needs to see the result (pip, npm install, etc).
+        Use for commands where AI needs to see the result.
         """
         if not term_mgr:
             init_terminal_manager()
@@ -744,30 +685,27 @@ What is the corrected command? Reply with ONLY the command."""
         agents({"runner": "done"})
         return ok, output
     
-    async def runner(cmd: str, terminal: str = None) -> Tuple[bool, str]:
+    async def runner(cmd: str, terminal: str = "main", use_visible: bool = True) -> Tuple[bool, str]:
         """
-        Smart runner - auto-allocates terminals, detects server commands.
+        Main runner - chooses between visible terminal or quiet execution.
         
         Args:
             cmd: Command to run
-            terminal: Optional terminal name (auto-allocated if None)
+            terminal: Terminal name for visible mode
+            use_visible: If True, run in visible window; if False, run quietly
         """
-        # Detect if this is a server/long-running command
-        is_server = any(x in cmd.lower() for x in [
+        # Detect if this needs visible terminal (servers, interactive)
+        needs_visible = any(x in cmd.lower() for x in [
             "flask run", "npm start", "npm run", "python -m http",
             "uvicorn", "gunicorn", "node server", "python app",
             "python main", "python manage.py runserver"
         ])
         
-        # Quick commands run silently, everything else in visible terminal
-        quick_commands = ["pip install", "npm install", "python -m venv", "mkdir", "cd ", "ls", "dir"]
-        is_quick = any(x in cmd.lower() for x in quick_commands) and not is_server
-        
-        if is_quick:
-            return await run_quick(cmd)
+        if use_visible or needs_visible:
+            await run_in_terminal(cmd, terminal)
+            return True, f"Command sent to terminal [{terminal}]"
         else:
-            used_terminal = await run_in_terminal(cmd, terminal)
-            return True, f"Command sent to terminal [{used_terminal}]"
+            return await run_quick(cmd)
     
     async def setup_project_terminals():
         """
@@ -1011,55 +949,13 @@ Provide a helpful, concise answer."""
         if approved:
             ctx.plan_approved = True
             out("[green]✓ Plan approved[/]\n")
-            await execute_with_decisions()
+            await execute_remaining()
         else:
             out("[yellow]Plan rejected[/]")
             ctx.phase = "idle"
 
     
-    async def decide_next_step() -> Tuple[str, str]:
-        """
-        After each step, let orchestrator decide what to do next.
-        Returns (action, details) where action is:
-        - NEXT: proceed to next planned step
-        - RUN: run a command
-        - FIX: fix an issue
-        - DONE: we're finished
-        - ASK: need user input
-        """
-        context = ctx.get_context_for_llm()
-        terminals_status = term_mgr.get_status() if term_mgr else {}
-        
-        prompt = f"""{context}
-
-Current terminals: {terminals_status}
-
-We just completed step {ctx.current_step} of {len(ctx.plan_steps)}.
-
-What should we do next? Consider:
-- Are there more files to create?
-- Do we need to install dependencies (pip/npm)?
-- Should we run the application?
-- Is anything broken that needs fixing?
-
-Reply with ONE of:
-- NEXT: [reason] - continue with next planned step
-- RUN: [command] - run a specific command now
-- DONE: [summary] - we're finished
-- ASK: [question] - need to ask user something
-
-Reply with ONLY the action."""
-
-        response = await llm_call(prompt, "You orchestrate software development. Be decisive.")
-        response = response.strip()
-        
-        if ":" in response:
-            parts = response.split(":", 1)
-            return parts[0].strip().upper(), parts[1].strip()
-        return response.upper(), ""
-    
-    async def execute_with_decisions():
-        """Execute plan with dynamic decision-making after each step."""
+    async def execute_remaining():
         ctx.phase = "executing"
         
         while ctx.current_step < len(ctx.plan_steps):
@@ -1111,25 +1007,6 @@ Reply with ONLY the action."""
                 step["done"] = True
             
             ctx.current_step += 1
-            
-            # DYNAMIC DECISION: After each step, decide what to do next
-            if ctx.current_step < len(ctx.plan_steps):
-                out(f"\n[#9966ff]🎯 ORCHESTRATOR: Deciding next action...[/]")
-                action, details = await decide_next_step()
-                out(f"[dim]  Decision: {action} → {details[:40] if details else ''}[/]")
-                
-                if action == "RUN":
-                    # Execute a command that wasn't in the original plan
-                    approved = await ask_approval(f"Run: {details}?")
-                    if approved:
-                        await runner(details)
-                elif action == "DONE":
-                    out(f"[green]✓ Orchestrator decided we're done: {details}[/]")
-                    break
-                elif action == "ASK":
-                    out(f"[yellow]Orchestrator needs input: {details}[/]")
-                    # Could implement user prompt here
-                # NEXT continues automatically
         
         ctx.phase = "complete"
         out(f"\n[green bold]✅ COMPLETE! Created {len(ctx.files)} files.[/]")
