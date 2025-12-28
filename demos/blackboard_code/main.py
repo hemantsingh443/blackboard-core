@@ -1,0 +1,1063 @@
+#!/usr/bin/env python
+"""
+🔧 Blackboard Code - Orchestrator-Centric Multi-Agent IDE
+
+Fixes:
+- Proper markdown rendering with Rich
+- Syntax highlighting for code
+- Simple approval bar (no preview)
+- True diff-based fixes
+- Context persistence across follow-up messages
+"""
+
+import asyncio
+import signal
+import sys
+import os
+import tempfile
+import webbrowser
+import difflib
+import re
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, Optional, List, Tuple, Any
+from dataclasses import dataclass, field
+from enum import Enum
+from dotenv import load_dotenv
+
+_project_root = Path(__file__).parent.parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+load_dotenv()
+
+
+# ============================================================
+# Role definitions
+# ============================================================
+class Role(Enum):
+    ORCHESTRATOR = ("🎯", "#9966ff", "Orchestrator")
+    PLANNER = ("📋", "#00d4ff", "Planner")
+    CODER = ("💻", "#00ff88", "Coder")
+    REVIEWER = ("🔍", "#ffd700", "Reviewer")
+    FIXER = ("🔧", "#ff6b6b", "Fixer")
+    RUNNER = ("⚡", "#00ffff", "Runner")
+    USER = ("👤", "#ffffff", "You")
+
+
+# ============================================================
+# Session Context
+# ============================================================
+@dataclass
+class SessionContext:
+    goal: str = ""
+    conversation: List[Dict] = field(default_factory=list)
+    plan: Optional[str] = None
+    plan_steps: List[Dict] = field(default_factory=list)
+    plan_approved: bool = False
+    current_step: int = 0  # Track progress
+    files: Dict[str, str] = field(default_factory=dict)
+    file_versions: Dict[str, List[str]] = field(default_factory=dict)
+    phase: str = "idle"
+    
+    def add_message(self, role: str, content: str):
+        self.conversation.append({"role": role, "content": content, "time": datetime.now().isoformat()})
+    
+    def get_progress(self) -> str:
+        if not self.plan_steps:
+            return "No plan yet"
+        completed = len([s for s in self.plan_steps[:self.current_step] if s.get("done")])
+        total = len(self.plan_steps)
+        return f"{completed}/{total} steps done"
+    
+    def save_file(self, path: str, content: str, sandbox: Path):
+        # Track versions
+        if path in self.files:
+            if path not in self.file_versions:
+                self.file_versions[path] = []
+            self.file_versions[path].append(self.files[path])
+        
+        self.files[path] = content
+        full = sandbox / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(content, encoding="utf-8")
+    
+    def get_context_for_llm(self) -> str:
+        """Full context for LLM continuity."""
+        parts = [f"GOAL: {self.goal}"]
+        
+        if self.plan:
+            parts.append(f"\nAPPROVED PLAN:\n{self.plan}")
+        
+        if self.plan_steps:
+            parts.append(f"\nPROGRESS: {self.get_progress()}")
+            for i, s in enumerate(self.plan_steps):
+                status = "✓" if s.get("done") else "○"
+                parts.append(f"  {status} Step {i+1}: {s.get('name', s.get('cmd', '?'))}")
+        
+        if self.files:
+            parts.append(f"\nCREATED FILES:")
+            for f in self.files:
+                parts.append(f"  - {f}")
+        
+        return "\n".join(parts)
+
+
+# ============================================================
+# Terminal Manager - Multi-terminal support
+# ============================================================
+class TerminalManager:
+    """Manages multiple terminal instances with non-blocking I/O."""
+    
+    def __init__(self, sandbox: Path, on_output=None):
+        self.sandbox = sandbox
+        self.on_output = on_output  # Callback for output
+        self.terminals: Dict[str, dict] = {}  # name -> {proc, task, output}
+        self.command_history: List[dict] = []
+    
+    async def run(self, cmd: str, name: str = "main", timeout: int = 30, 
+                  background: bool = False, cwd: str = None) -> Tuple[bool, str]:
+        """Run a command in a terminal instance."""
+        work_dir = Path(cwd) if cwd else self.sandbox
+        
+        self._emit(f"[#00ffff]━━━ ⚡ TERMINAL [{name}] ━━━[/]")
+        self._emit(f"  $ {cmd}")
+        
+        if background:
+            return await self._run_background(cmd, name, work_dir)
+        else:
+            return await self._run_blocking(cmd, name, work_dir, timeout)
+    
+    async def _run_blocking(self, cmd: str, name: str, cwd: Path, timeout: int) -> Tuple[bool, str]:
+        """Run command and wait for completion."""
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd, cwd=str(cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout)
+                output = stdout.decode() + stderr.decode()
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                self._emit(f"[yellow]  ⏱ Timeout ({timeout}s)[/]")
+                return False, "Timeout"
+            
+            ok = proc.returncode == 0
+            
+            if output.strip():
+                for line in output.strip().split("\n")[:15]:
+                    self._emit(f"  {line}")
+            
+            self._emit(f"[{'green' if ok else 'red'}]  {'✓' if ok else '✗'} Exit: {proc.returncode}[/]")
+            
+            self.command_history.append({
+                "cmd": cmd, "name": name, "ok": ok, 
+                "output": output[:500], "time": datetime.now().isoformat()
+            })
+            
+            return ok, output
+            
+        except Exception as e:
+            self._emit(f"[red]  Error: {e}[/]")
+            return False, str(e)
+    
+    async def _run_background(self, cmd: str, name: str, cwd: Path) -> Tuple[bool, str]:
+        """Start a background process (server, watcher, etc.)."""
+        if name in self.terminals:
+            await self.stop(name)
+        
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                cmd, cwd=str(cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            
+            self.terminals[name] = {
+                "proc": proc,
+                "cmd": cmd,
+                "output": [],
+                "started": datetime.now().isoformat()
+            }
+            
+            # Start output reader
+            asyncio.create_task(self._read_output(name))
+            
+            self._emit(f"[green]  ✓ Started in background (PID: {proc.pid})[/]")
+            
+            # Wait a bit to see if it crashes immediately
+            await asyncio.sleep(1)
+            if proc.returncode is not None:
+                return False, "Process exited immediately"
+            
+            return True, f"Running in background as [{name}]"
+            
+        except Exception as e:
+            self._emit(f"[red]  Error: {e}[/]")
+            return False, str(e)
+    
+    async def _read_output(self, name: str):
+        """Read output from background process."""
+        if name not in self.terminals:
+            return
+        
+        proc = self.terminals[name]["proc"]
+        
+        try:
+            async for line in proc.stdout:
+                text = line.decode().rstrip()
+                self.terminals[name]["output"].append(text)
+                # Keep last 100 lines
+                if len(self.terminals[name]["output"]) > 100:
+                    self.terminals[name]["output"] = self.terminals[name]["output"][-100:]
+        except:
+            pass
+    
+    async def stop(self, name: str) -> bool:
+        """Stop a background process."""
+        if name not in self.terminals:
+            return False
+        
+        proc = self.terminals[name]["proc"]
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), 5)
+            except asyncio.TimeoutError:
+                proc.kill()
+        
+        del self.terminals[name]
+        self._emit(f"[yellow]  ⊘ Stopped [{name}][/]")
+        return True
+    
+    async def stop_all(self):
+        """Stop all background processes."""
+        for name in list(self.terminals.keys()):
+            await self.stop(name)
+    
+    def get_output(self, name: str, lines: int = 20) -> str:
+        """Get recent output from a terminal."""
+        if name not in self.terminals:
+            return ""
+        return "\n".join(self.terminals[name]["output"][-lines:])
+    
+    def list_terminals(self) -> List[str]:
+        """List active terminals."""
+        return list(self.terminals.keys())
+    
+    def get_history(self, last_n: int = 5) -> List[dict]:
+        """Get recent command history."""
+        return self.command_history[-last_n:]
+    
+    def _emit(self, text: str):
+        if self.on_output:
+            self.on_output(text)
+
+
+
+def main():
+    import openai
+    from textual.app import App, ComposeResult
+    from textual.widgets import Header, Footer, Static, Button, RichLog, Input
+    from textual.containers import Horizontal, Vertical, Container
+    from textual.binding import Binding
+    from textual.message import Message
+    from textual import work
+    from rich.syntax import Syntax
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich import box
+    from rich.markup import escape
+    
+    from demos.blackboard_code.config import (
+        OPENROUTER_API_KEY, MODEL, MAX_TOKENS, OPENROUTER_HEADERS
+    )
+    
+    if not OPENROUTER_API_KEY:
+        print("❌ OPENROUTER_API_KEY not set!")
+        sys.exit(1)
+    
+    sandbox = Path(tempfile.mkdtemp(prefix="blackboard_code_"))
+    print(f"📁 Sandbox: {sandbox}")
+    
+    ctx = SessionContext()
+    tui: Optional[App] = None
+    
+    approval_event = asyncio.Event()
+    approval_result = False
+    
+    # ========================================
+    # Messages
+    # ========================================
+    class WriteOutput(Message):
+        def __init__(self, content: Any, role: Optional[Role] = None):
+            super().__init__()
+            self.content = content
+            self.role = role
+    
+    class WriteMarkdown(Message):
+        def __init__(self, md: str, role: Optional[Role] = None):
+            super().__init__()
+            self.md = md
+            self.role = role
+    
+    class WriteCode(Message):
+        def __init__(self, code: str, lang: str = "python", filename: str = ""):
+            super().__init__()
+            self.code = code
+            self.lang = lang
+            self.filename = filename
+    
+    class WriteDiff(Message):
+        def __init__(self, filename: str, old: str, new: str):
+            super().__init__()
+            self.filename = filename
+            self.old = old
+            self.new = new
+    
+    class ShowApproval(Message):
+        def __init__(self, text: str):
+            super().__init__()
+            self.text = text
+    
+    class HideApproval(Message):
+        pass
+    
+    class UpdateAgents(Message):
+        def __init__(self, status: Dict[str, str]):
+            super().__init__()
+            self.status = status
+    
+    class UpdateFiles(Message):
+        pass
+    
+    # ========================================
+    # Output helpers
+    # ========================================
+    def out(content: Any, role: Role = None):
+        if tui:
+            tui.post_message(WriteOutput(content, role))
+    
+    def out_md(md: str, role: Role = None):
+        if tui:
+            tui.post_message(WriteMarkdown(md, role))
+    
+    def out_code(code: str, lang: str = "python", filename: str = ""):
+        if tui:
+            tui.post_message(WriteCode(code, lang, filename))
+    
+    def out_diff(filename: str, old: str, new: str):
+        if tui:
+            tui.post_message(WriteDiff(filename, old, new))
+    
+    def agents(status: Dict[str, str]):
+        if tui:
+            tui.post_message(UpdateAgents(status))
+    
+    # ========================================
+    # LLM
+    # ========================================
+    client = openai.AsyncOpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY
+    )
+    
+    async def llm_stream(prompt: str, system: str, role: Role) -> str:
+        out(f"\n[{role.value[1]}]━━━ {role.value[0]} {role.value[2].upper()} ━━━[/]\n", role)
+        
+        try:
+            stream = await client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=MAX_TOKENS,
+                stream=True,
+                extra_headers=OPENROUTER_HEADERS
+            )
+            
+            result = ""
+            buffer = ""
+            
+            async for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    result += token
+                    buffer += token
+                    
+                    if len(buffer) > 80 or "\n" in buffer:
+                        out(escape(buffer), role)
+                        buffer = ""
+            
+            if buffer:
+                out(escape(buffer), role)
+            
+            out("\n", role)
+            return result
+            
+        except Exception as e:
+            out(f"[red]Error: {e}[/]")
+            return ""
+    
+    async def llm_call(prompt: str, system: str) -> str:
+        try:
+            r = await client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=MAX_TOKENS,
+                extra_headers=OPENROUTER_HEADERS
+            )
+            return r.choices[0].message.content
+        except Exception as e:
+            return f"Error: {e}"
+    
+    # ========================================
+    # Approval
+    # ========================================
+    async def ask_approval(text: str) -> bool:
+        nonlocal approval_result
+        if tui:
+            tui.post_message(ShowApproval(text))
+        approval_event.clear()
+        await approval_event.wait()
+        if tui:
+            tui.post_message(HideApproval())
+        return approval_result
+    
+    # ========================================
+    # Agents
+    # ========================================
+    async def planner() -> str:
+        agents({"planner": "working"})
+        
+        out(f"\n[#00d4ff]━━━ 📋 PLANNER ━━━[/]")
+        out("[dim]Creating implementation plan...[/]\n")
+        
+        prompt = f"""Create a plan for: {ctx.goal}
+
+Output as markdown:
+## Files to Create
+1. **filename.ext** - description
+2. ...
+
+## Commands (if needed)
+- `command` - purpose
+
+Be specific but concise."""
+        
+        # Non-streaming for clean markdown rendering
+        plan = await llm_call(prompt, "You are a software architect.")
+        
+        # Render as markdown
+        out_md(plan)
+        
+        ctx.plan = plan
+        ctx.plan_steps = []
+        
+        # Parse
+        for line in plan.split("\n"):
+            if "**" in line and "." in line:
+                m = re.search(r'\*\*([^*]+\.[a-z]+)\*\*', line, re.I)
+                if m:
+                    ctx.plan_steps.append({"type": "file", "name": m.group(1), "desc": line.split("-")[-1].strip() if "-" in line else "", "done": False})
+            elif "`" in line and any(x in line.lower() for x in ["pip", "npm", "python"]):
+                m = re.search(r'`([^`]+)`', line)
+                if m:
+                    ctx.plan_steps.append({"type": "cmd", "cmd": m.group(1), "done": False})
+        
+        if not ctx.plan_steps:
+            ctx.plan_steps = [{"type": "file", "name": "main.py", "desc": "Main app", "done": False}]
+        
+        agents({"planner": "done"})
+        return plan
+    
+    async def coder(filename: str, desc: str) -> str:
+        agents({"coder": "working"})
+        
+        out(f"\n[#00ff88]━━━ 💻 CODER: {filename} ━━━[/]")
+        out("[dim]Generating code...[/]\n")
+        
+        ext = filename.split(".")[-1] if "." in filename else "txt"
+        lang_map = {"py": "python", "js": "javascript", "html": "html", "css": "css", "json": "json"}
+        lang = lang_map.get(ext, "text")
+        
+        # Full context
+        context = ctx.get_context_for_llm()
+        
+        existing = ""
+        if ctx.files:
+            existing = "\nEXISTING FILES:\n"
+            for f, c in list(ctx.files.items())[:5]:
+                existing += f"\n--- {f} ---\n{c[:600]}\n"
+        
+        prompt = f"""{context}
+{existing}
+
+Generate complete code for: {filename}
+Description: {desc}
+
+Output ONLY the code. Make it work with other project files."""
+        
+        # Non-streaming for clean syntax highlighting
+        code = await llm_call(prompt, f"You write {lang} code.")
+        
+        # Clean
+        if code.startswith("```"):
+            lines = code.split("\n")
+            code = "\n".join(lines[1:])
+        if code.rstrip().endswith("```"):
+            code = code.rstrip()[:-3]
+        
+        # Show with syntax highlighting
+        out_code(code.strip(), lang, filename)
+        
+        agents({"coder": "done"})
+        return code.strip()
+    
+    async def reviewer(filename: str, code: str) -> Tuple[bool, str]:
+        agents({"reviewer": "working"})
+        
+        out(f"\n[#ffd700]━━━ 🔍 REVIEWER: {filename} ━━━[/]")
+        
+        context = ctx.get_context_for_llm()
+        
+        prompt = f"""{context}
+
+FILE: {filename}
+```
+{code[:2000]}
+```
+
+Quick review. Reply with ONLY:
+- PASS if acceptable
+- FIX: one issue (only for critical bugs)
+
+Be lenient. Multi-file projects may have cross-references."""
+        
+        response = await llm_call(prompt, "Lenient code reviewer.")
+        
+        out(f"  {escape(response[:100])}")
+        
+        passed = "PASS" in response.upper() or "FIX" not in response.upper()
+        
+        if passed:
+            out("[green]  ✓ Approved[/]")
+        else:
+            out("[yellow]  ⚠ Needs fix[/]")
+        
+        agents({"reviewer": "done" if passed else "waiting"})
+        return passed, response
+    
+    async def fixer(filename: str, code: str, issue: str) -> str:
+        agents({"fixer": "working"})
+        
+        out(f"\n[#ff6b6b]━━━ 🔧 FIXER: {filename} ━━━[/]")
+        out(f"  Issue: {escape(issue[:80])}")
+        
+        prompt = f"""Fix this issue: {issue}
+
+Current code:
+```
+{code[:1500]}
+```
+
+Output ONLY the corrected code."""
+        
+        fixed = await llm_stream(prompt, "You fix code bugs.", Role.FIXER)
+        
+        # Clean
+        if fixed.startswith("```"):
+            lines = fixed.split("\n")
+            fixed = "\n".join(lines[1:])
+        if fixed.rstrip().endswith("```"):
+            fixed = fixed.rstrip()[:-3]
+        
+        # Show diff
+        out_diff(filename, code, fixed.strip())
+        
+        agents({"fixer": "done"})
+        return fixed.strip()
+    
+    # Initialize terminal manager
+    term_mgr: Optional[TerminalManager] = None
+    
+    def init_terminal_manager():
+        nonlocal term_mgr
+        term_mgr = TerminalManager(sandbox, on_output=lambda t: out(t))
+    
+    async def runner(cmd: str, terminal: str = "main", background: bool = False, 
+                     max_retries: int = 2) -> Tuple[bool, str]:
+        """
+        Smart runner with multi-terminal support and autonomous error recovery.
+        
+        Args:
+            cmd: Command to run
+            terminal: Terminal instance name (e.g., "backend", "frontend")
+            background: If True, run as background process (for servers)
+            max_retries: Number of auto-fix attempts on failure
+        """
+        if not term_mgr:
+            init_terminal_manager()
+        
+        agents({"runner": "working"})
+        
+        # Smart command adaptation using LLM
+        files_list = list(ctx.files.keys())
+        
+        # Quick heuristics for common patterns
+        adapted_cmd = cmd
+        
+        # Find correct paths for requirements.txt, scripts, etc.
+        if "requirements" in cmd.lower() and "-r" in cmd:
+            for f in files_list:
+                if "requirements" in f.lower() and f.endswith(".txt"):
+                    adapted_cmd = cmd.replace("requirements.txt", f)
+                    out(f"[dim]  → Using: {f}[/]")
+                    break
+        
+        # For python/flask/npm commands, detect if we need to cd first
+        working_dir = None
+        if any(x in cmd.lower() for x in ["python", "flask", "npm", "node"]):
+            # Find common subdirectories
+            for f in files_list:
+                if "/" in f:
+                    subdir = f.split("/")[0]
+                    if subdir in ["backend", "frontend", "server", "client", "api", "app"]:
+                        working_dir = str(sandbox / subdir)
+                        out(f"[dim]  → Working dir: {subdir}/[/]")
+                        break
+        
+        # Detect if this is a server command (should be background)
+        is_server = any(x in cmd.lower() for x in [
+            "flask run", "python app", "python main", "npm start", 
+            "npm run dev", "python -m http.server", "uvicorn", "gunicorn"
+        ])
+        if is_server and not background:
+            out(f"[dim]  → Detected server command, running in background[/]")
+            background = True
+        
+        # Run with retry logic
+        retries = 0
+        last_output = ""
+        current_cmd = adapted_cmd
+        
+        while retries <= max_retries:
+            ok, output = await term_mgr.run(
+                current_cmd, 
+                name=terminal, 
+                background=background,
+                cwd=working_dir,
+                timeout=30 if not background else 0
+            )
+            last_output = output
+            
+            if ok:
+                agents({"runner": "done"})
+                return True, output
+            
+            # If background command that's still running, consider it success
+            if background and terminal in term_mgr.list_terminals():
+                agents({"runner": "done"})
+                return True, "Running in background"
+            
+            # Auto-fix on failure
+            if retries < max_retries and not background:
+                out(f"[yellow]  🔧 Auto-fix attempt ({retries + 1}/{max_retries})...[/]")
+                
+                fix_prompt = f"""Command failed:
+$ {current_cmd}
+
+Error: {output[:600]}
+
+Available files: {', '.join(files_list[:15])}
+Working directory: {working_dir or sandbox}
+OS: {sys.platform}
+
+What is the corrected command? Consider:
+- File paths (check if files exist in subdirectories)
+- Missing dependencies (pip install, npm install)
+- Environment variables
+- Windows vs Unix syntax
+
+Reply with ONLY the corrected command."""
+                
+                new_cmd = await llm_call(fix_prompt, "You fix shell commands. Output only the command.")
+                new_cmd = new_cmd.strip().strip("`").split("\n")[0]
+                
+                if new_cmd and new_cmd != current_cmd and len(new_cmd) < 200:
+                    out(f"[cyan]  → Trying: {new_cmd}[/]")
+                    current_cmd = new_cmd
+                    retries += 1
+                else:
+                    break
+            else:
+                break
+        
+        # Store failure in context
+        ctx.add_message("system", f"Command failed: {current_cmd}\nOutput: {last_output[:400]}")
+        agents({"runner": "done"})
+        return False, last_output
+    
+    async def stop_terminal(name: str) -> bool:
+        """Stop a background terminal process."""
+        if term_mgr:
+            return await term_mgr.stop(name)
+        return False
+    
+    async def get_terminal_output(name: str, lines: int = 20) -> str:
+        """Get recent output from a terminal."""
+        if term_mgr:
+            return term_mgr.get_output(name, lines)
+        return ""
+    
+    async def cleanup_terminals():
+        """Stop all terminals on exit."""
+        if term_mgr:
+            await term_mgr.stop_all()
+
+    
+    # ========================================
+    # Orchestrator
+    # ========================================
+    async def orchestrate(user_input: str):
+        nonlocal approval_result
+        
+        ctx.add_message("user", user_input)
+        out(f"\n[white bold]👤 You:[/] {escape(user_input)}\n")
+        
+        # Check if this is about an error/issue with current work
+        error_keywords = ["error", "fail", "not work", "issue", "problem", "wrong", "couldn't", "could not", "can't", "cannot"]
+        is_error_followup = any(kw in user_input.lower() for kw in error_keywords) and ctx.files
+        
+        if is_error_followup:
+            out(f"[#9966ff]🎯 ORCHESTRATOR: Analyzing the issue...[/]")
+            
+            # Get recent errors from context
+            recent_errors = [m for m in ctx.conversation if m.get("role") == "system" and "failed" in m.get("content", "").lower()]
+            error_context = recent_errors[-1]["content"] if recent_errors else ""
+            
+            # Ask LLM how to fix
+            context = ctx.get_context_for_llm()
+            fix_prompt = f"""{context}
+
+User reports: {user_input}
+
+Recent error: {error_context}
+
+Files we have: {list(ctx.files.keys())}
+
+What should we do to fix this? Reply with one of:
+1. RUN: <command> - if we need to run a specific command
+2. FIX: <filename> - if we need to modify a file
+3. CREATE: <filename> - if we need to create a new file
+4. EXPLAIN: <explanation> - if we just need to explain something"""
+            
+            response = await llm_call(fix_prompt, "You diagnose and fix project issues.")
+            out(f"[dim]{escape(response[:200])}[/]")
+            
+            if response.startswith("RUN:"):
+                cmd = response.replace("RUN:", "").strip()
+                approved = await ask_approval(f"Run: {cmd}?")
+                if approved:
+                    await runner(cmd)
+            elif response.startswith("FIX:"):
+                filename = response.replace("FIX:", "").strip().split()[0]
+                if filename in ctx.files:
+                    # Get the file and fix it
+                    code = ctx.files[filename]
+                    fixed = await fixer(filename, code, user_input)
+                    approved = await ask_approval(f"Update {filename}?")
+                    if approved:
+                        ctx.save_file(filename, fixed, sandbox)
+                        out(f"[green]✓ Updated {filename}[/]")
+            else:
+                out(f"[dim]{escape(response)}[/]")
+            
+            return
+        
+        # Check if continuing previous work
+        if ctx.phase == "complete" or (ctx.plan_approved and ctx.files):
+            out(f"[#9966ff]🎯 ORCHESTRATOR: Continuing from previous work...[/]")
+            out(f"[dim]{ctx.get_progress()}[/]")
+            
+            if "continue" in user_input.lower():
+                if ctx.current_step < len(ctx.plan_steps):
+                    out(f"[dim]Resuming from step {ctx.current_step + 1}[/]")
+                    await execute_remaining()
+                    return
+            else:
+                # Modification request - keep existing files
+                ctx.goal = user_input
+                ctx.plan = None
+                ctx.plan_approved = False
+                ctx.current_step = 0
+        else:
+            ctx.goal = user_input
+        
+        # Planning
+        ctx.phase = "planning"
+        out(f"\n[#9966ff]🎯 ORCHESTRATOR: Starting planning...[/]\n")
+        
+        await planner()
+        
+        # Approval
+        ctx.phase = "awaiting_approval"
+        approved = await ask_approval(f"Approve plan? ({len(ctx.plan_steps)} steps)")
+        
+        if approved:
+            ctx.plan_approved = True
+            out("[green]✓ Plan approved[/]\n")
+            await execute_remaining()
+        else:
+            out("[yellow]Plan rejected[/]")
+            ctx.phase = "idle"
+    
+    async def execute_remaining():
+        ctx.phase = "executing"
+        
+        while ctx.current_step < len(ctx.plan_steps):
+            step = ctx.plan_steps[ctx.current_step]
+            
+            if step.get("done"):
+                ctx.current_step += 1
+                continue
+            
+            if step["type"] == "file":
+                filename = step["name"]
+                
+                # Code
+                code = await coder(filename, step.get("desc", ctx.goal))
+                
+                # Review
+                passed, feedback = await reviewer(filename, code)
+                
+                # Fix loop
+                attempts = 0
+                while not passed and attempts < 2:
+                    code = await fixer(filename, code, feedback)
+                    passed, feedback = await reviewer(filename, code)
+                    attempts += 1
+                
+                # Approval
+                approved = await ask_approval(f"Create {filename}?")
+                
+                if approved:
+                    ctx.save_file(filename, code, sandbox)
+                    out(f"[green]✓ Created {filename}[/]")
+                    if tui:
+                        tui.post_message(UpdateFiles())
+                else:
+                    out(f"[dim]Skipped {filename}[/]")
+                
+                step["done"] = True
+            
+            elif step["type"] == "cmd":
+                cmd = step["cmd"]
+                
+                approved = await ask_approval(f"Run: {cmd}?")
+                
+                if approved:
+                    await runner(cmd)
+                else:
+                    out(f"[dim]Skipped: {cmd}[/]")
+                
+                step["done"] = True
+            
+            ctx.current_step += 1
+        
+        ctx.phase = "complete"
+        out(f"\n[green bold]✅ COMPLETE! Created {len(ctx.files)} files.[/]")
+        out("[dim]Type to continue or add features.[/]\n")
+    
+    # ========================================
+    # TUI
+    # ========================================
+    class BlackboardCode(App):
+        TITLE = "Blackboard Code"
+        
+        CSS = """
+        Screen { background: #0a0a14; }
+        #main { layout: horizontal; height: 100%; }
+        #content { width: 80%; }
+        #sidebar { width: 20%; background: #0f0f1a; border-left: solid #333; padding: 1; }
+        
+        #output { height: 1fr; padding: 1; }
+        
+        #approval-bar {
+            height: 3;
+            background: #2a2a40;
+            border-top: solid #ffd700;
+            padding: 0 1;
+            display: none;
+        }
+        #approval-bar.show { display: block; }
+        #approval-text { width: 1fr; }
+        #approval-btns { layout: horizontal; width: auto; }
+        #btn-yes { background: #00ff88; color: #000; }
+        #btn-no { background: #ff4444; }
+        
+        #input-box { height: auto; background: #1a1a2e; padding: 1; border-top: solid #333; }
+        #prompt { width: 100%; }
+        
+        .section-title { color: #ffd700; text-style: bold; margin-bottom: 1; }
+        #agents-box { height: auto; }
+        #files-box { height: auto; margin-top: 1; }
+        
+        #btn-box { margin-top: 1; }
+        #btn-box Button { width: 100%; margin-bottom: 1; }
+        #preview { background: #00ff88; color: #000; }
+        #folder { background: #00d4ff; color: #000; }
+        
+        RichLog { background: transparent; }
+        Header { background: #9966ff; }
+        Footer { background: #0f0f1a; }
+        """
+        
+        BINDINGS = [Binding("q", "quit", "Quit"), Binding("ctrl+o", "folder", "Folder")]
+        
+        def compose(self) -> ComposeResult:
+            yield Header()
+            with Horizontal(id="main"):
+                with Vertical(id="content"):
+                    yield RichLog(id="output", markup=True, wrap=True, auto_scroll=True, highlight=True)
+                    with Horizontal(id="approval-bar"):
+                        yield Static("", id="approval-text")
+                        with Horizontal(id="approval-btns"):
+                            yield Button("✅ Yes", id="btn-yes")
+                            yield Button("❌ No", id="btn-no")
+                    with Container(id="input-box"):
+                        yield Input(placeholder="What should I build?", id="prompt")
+                
+                with Vertical(id="sidebar"):
+                    yield Static("🤖 AGENTS", classes="section-title")
+                    yield Static("", id="agents-box")
+                    yield Static("📁 FILES", classes="section-title")
+                    yield Static("[dim]No files[/]", id="files-box")
+                    with Container(id="btn-box"):
+                        yield Button("👁️ Preview", id="preview")
+                        yield Button("📂 Folder", id="folder")
+            yield Footer()
+        
+        def on_mount(self):
+            nonlocal tui
+            tui = self
+            self.update_agents({})
+            
+            log = self.query_one("#output", RichLog)
+            log.write(Panel(
+                "[bold #9966ff]🔧 BLACKBOARD CODE[/]\n\n"
+                "Multi-agent coding with context persistence.\n\n"
+                "[dim]Try: Create a todo app[/]",
+                border_style="#9966ff"
+            ))
+        
+        def update_agents(self, status: Dict[str, str]):
+            icons = {"idle": "⚫", "working": "🟢", "waiting": "🟡", "done": "✅"}
+            lines = []
+            for name in ["planner", "coder", "reviewer", "fixer", "runner"]:
+                s = status.get(name, "idle")
+                lines.append(f"{icons.get(s, '⚫')} {name.title()}")
+            self.query_one("#agents-box", Static).update("\n".join(lines))
+        
+        def on_input_submitted(self, e):
+            if e.input.id == "prompt":
+                text = e.value.strip()
+                if text:
+                    e.input.value = ""
+                    self.run_task(text)
+        
+        @work(exclusive=True)
+        async def run_task(self, text: str):
+            await orchestrate(text)
+        
+        def on_write_output(self, m: WriteOutput):
+            log = self.query_one("#output", RichLog)
+            if isinstance(m.content, str):
+                log.write(m.content)
+            else:
+                log.write(m.content)
+        
+        def on_write_markdown(self, m: WriteMarkdown):
+            log = self.query_one("#output", RichLog)
+            log.write(Markdown(m.md))
+        
+        def on_write_code(self, m: WriteCode):
+            log = self.query_one("#output", RichLog)
+            if m.filename:
+                log.write(f"[dim]─── {m.filename} ───[/]")
+            log.write(Syntax(m.code, m.lang, theme="monokai", line_numbers=True, word_wrap=True))
+        
+        def on_write_diff(self, m: WriteDiff):
+            log = self.query_one("#output", RichLog)
+            log.write(f"[#ff6b6b]─── Diff: {m.filename} ───[/]")
+            
+            old_lines = m.old.splitlines(keepends=True)
+            new_lines = m.new.splitlines(keepends=True)
+            
+            diff = difflib.unified_diff(old_lines, new_lines, lineterm="")
+            for line in diff:
+                line = line.rstrip()
+                if line.startswith("+") and not line.startswith("+++"):
+                    log.write(f"[green]{escape(line)}[/]")
+                elif line.startswith("-") and not line.startswith("---"):
+                    log.write(f"[red]{escape(line)}[/]")
+                elif line.startswith("@@"):
+                    log.write(f"[cyan]{escape(line)}[/]")
+        
+        def on_show_approval(self, m: ShowApproval):
+            self.query_one("#approval-text", Static).update(f"[#ffd700]⚠️ {m.text}[/]")
+            self.query_one("#approval-bar", Horizontal).add_class("show")
+        
+        def on_hide_approval(self, m: HideApproval):
+            self.query_one("#approval-bar", Horizontal).remove_class("show")
+        
+        def on_update_agents(self, m: UpdateAgents):
+            self.update_agents(m.status)
+        
+        def on_update_files(self, m: UpdateFiles):
+            icons = {"py": "🐍", "html": "🌐", "css": "🎨", "js": "⚡"}
+            if ctx.files:
+                lines = []
+                for f in sorted(ctx.files.keys()):
+                    ext = f.split(".")[-1] if "." in f else ""
+                    lines.append(f"{icons.get(ext, '📄')} {f}")
+                self.query_one("#files-box", Static).update("\n".join(lines))
+        
+        def on_button_pressed(self, e):
+            nonlocal approval_result
+            if e.button.id == "btn-yes":
+                approval_result = True
+                approval_event.set()
+            elif e.button.id == "btn-no":
+                approval_result = False
+                approval_event.set()
+            elif e.button.id == "preview":
+                for f in ctx.files:
+                    if f.endswith(".html"):
+                        webbrowser.open(f"file://{sandbox / f}")
+                        return
+            elif e.button.id == "folder":
+                if sys.platform == "win32":
+                    os.startfile(str(sandbox))
+        
+        def action_folder(self):
+            if sys.platform == "win32":
+                os.startfile(str(sandbox))
+    
+    BlackboardCode().run()
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGINT, lambda s, f: sys.exit(0))
+    if sys.platform == "win32":
+        signal.signal(signal.SIGBREAK, lambda s, f: sys.exit(0))
+    main()
