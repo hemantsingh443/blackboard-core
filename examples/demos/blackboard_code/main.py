@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 """
 🔧 Blackboard Code - Orchestrator-Centric Multi-Agent IDE
 

@@ -440,9 +440,10 @@ class Orchestrator:
         state = await persistence.load(session_id)
         
         # Mark as recovered
+        previous_status = state.status.value
         state.update_status(Status.PAUSED)
         state.metadata["recovery_mode"] = True
-        state.metadata["recovered_from_status"] = state.status.value
+        state.metadata["recovered_from_status"] = previous_status
         
         # Add recovery feedback
         state.add_feedback(Feedback(
@@ -1696,7 +1697,7 @@ class Agent(Worker):
         """
         # If only a few steps, just return the last artifact
         if state.step_count <= 3 and state.artifacts:
-            last_artifact = state.get_latest_artifact()
+            last_artifact = state.get_last_artifact()
             if last_artifact:
                 return f"Result: {last_artifact.content}"
         
@@ -1711,7 +1712,7 @@ class Agent(Worker):
         if state.artifacts:
             summary_parts.append(f"Artifacts created: {len(state.artifacts)}")
             # Include content of latest artifact (truncated)
-            latest = state.get_latest_artifact()
+            latest = state.get_last_artifact()
             if latest:
                 content_preview = str(latest.content)[:500]
                 if len(str(latest.content)) > 500:

@@ -6,21 +6,21 @@ Manages active orchestrator sessions for the API server.
 .. warning::
     The API is STATEFUL. Sessions are stored in memory by default.
     If the server restarts (deployment, crash), all active and paused
-    sessions will be lost unless you configure a sessions_dir.
+    sessions will be lost unless you configure a persistence backend
+    or sessions_dir snapshots.
     
     For production deployments with HumanProxyWorker pause/resume flows,
-    configure sessions_dir for auto-save/restore:
+    prefer a persistence backend for step-by-step recovery:
     
         manager = SessionManager(
             factory, 
-            sessions_dir="./api_sessions"
+            persistence=SQLitePersistence("./sessions.db")
         )
 """
 
 import asyncio
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -190,7 +190,13 @@ class SessionManager:
         # Basic (in-memory only - sessions lost on restart)
         manager = SessionManager(create_orchestrator)
         
-        # With file-based auto-save (survives restarts)
+        # With durable persistence (preferred)
+        manager = SessionManager(
+            create_orchestrator,
+            persistence=SQLitePersistence("./sessions.db")
+        )
+
+        # With file-based auto-save (compatibility fallback)
         manager = SessionManager(
             create_orchestrator,
             sessions_dir="./api_sessions"
@@ -222,12 +228,67 @@ class SessionManager:
     
     async def start(self) -> None:
         """Start the session manager (cleanup task)."""
-        # Restore sessions from disk if sessions_dir is configured
-        if self.sessions_dir:
+        if self.persistence:
+            await self._restore_sessions_from_persistence()
+        elif self.sessions_dir:
+            # Restore sessions from disk if sessions_dir is configured
             await self._restore_sessions()
         
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
         logger.info("SessionManager started")
+
+    def _map_blackboard_status(self, state: Blackboard) -> RunStatus:
+        """Map persisted blackboard status to API session status."""
+        if state.status == Status.DONE:
+            return RunStatus.COMPLETED
+        if state.status == Status.FAILED:
+            return RunStatus.FAILED
+        return RunStatus.PAUSED
+
+    def _create_session_state(self, session: RunSession) -> Blackboard:
+        """Create an initial blackboard state tagged with the API session ID."""
+        state = Blackboard(goal=session.goal, status=Status.PLANNING)
+        state.metadata["session_id"] = session.id
+        return state
+
+    async def _restore_sessions_from_persistence(self) -> None:
+        """Restore sessions from the configured persistence backend."""
+        if not self.persistence:
+            return
+
+        restored = 0
+        try:
+            session_ids = await self.persistence.list_sessions()
+        except Exception as e:
+            logger.warning(f"Failed to list persisted sessions: {e}")
+            return
+
+        for session_id in session_ids:
+            try:
+                state = await self.persistence.load(session_id)
+                if state.metadata.get("session_id") != session_id:
+                    state.metadata["session_id"] = session_id
+
+                run_status = self._map_blackboard_status(state)
+                if run_status == RunStatus.PAUSED and state.status not in (Status.PAUSED, Status.DONE, Status.FAILED):
+                    state.update_status(Status.PAUSED)
+
+                completed_at = datetime.now() if run_status in (RunStatus.COMPLETED, RunStatus.FAILED) else None
+                session = RunSession(
+                    id=session_id,
+                    goal=state.goal,
+                    status=run_status,
+                    state=state,
+                    created_at=datetime.now(),
+                    completed_at=completed_at,
+                )
+                self._sessions[session_id] = session
+                restored += 1
+            except Exception as e:
+                logger.warning(f"Failed to restore session {session_id} from persistence: {e}")
+
+        if restored:
+            logger.info(f"Restored {restored} sessions from persistence")
     
     async def _restore_sessions(self) -> None:
         """Restore paused sessions from disk."""
@@ -397,6 +458,11 @@ class SessionManager:
         
         # Create orchestrator
         orchestrator = self.orchestrator_factory()
+        if self.persistence:
+            orchestrator.set_persistence(self.persistence)
+        state = session.state or self._create_session_state(session)
+        state.metadata["session_id"] = session.id
+        session.state = state
         
         # Subscribe to events
         async def on_event(event: Event):
@@ -411,7 +477,7 @@ class SessionManager:
         # Run in background task
         async def run_task():
             try:
-                state = await orchestrator.run(goal=session.goal, max_steps=max_steps)
+                state = await orchestrator.run(state=session.state, max_steps=max_steps)
                 session.state = state
                 
                 if state.status == Status.DONE:
@@ -488,6 +554,9 @@ class SessionManager:
         
         # Create orchestrator
         orchestrator = self.orchestrator_factory()
+        if self.persistence:
+            orchestrator.set_persistence(self.persistence)
+        session.state.metadata["session_id"] = session.id
         
         # Subscribe to events
         async def on_event(event: Event):
