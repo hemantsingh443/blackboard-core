@@ -12,7 +12,7 @@ Features:
 Usage:
     # Start the API server
     blackboard serve my_module:create_orchestrator
-    
+
     # In another terminal, start the UI
     blackboard ui
 
@@ -20,8 +20,15 @@ Requirements:
     pip install streamlit httpx sseclient-py
 """
 
-import streamlit as st
-import httpx
+try:
+    import streamlit as st
+except ImportError:  # pragma: no cover - exercised in client-only tests
+    st = None  # type: ignore
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - exercised in client-only tests
+    httpx = None  # type: ignore
 import json
 import time
 from datetime import datetime
@@ -35,6 +42,45 @@ from typing import Optional, Dict, Any, List
 DEFAULT_API_URL = "http://localhost:8000"
 
 
+def _require_streamlit():
+    """Raise a clear error when Streamlit UI dependencies are missing."""
+    if st is None:
+        raise ImportError(
+            "streamlit not installed. Install with: pip install blackboard-core[ui]"
+        )
+
+
+def _require_httpx():
+    """Raise a clear error when the HTTP client dependency is missing."""
+    if httpx is None:
+        raise ImportError(
+            "httpx not installed. Install with: pip install blackboard-core[ui]"
+        )
+
+
+def extract_run_id(run_data: Dict[str, Any]) -> Optional[str]:
+    """Extract the run identifier from an API response."""
+    return run_data.get("id") or run_data.get("run_id")
+
+
+def load_run_view_data(client: "BlackboardClient", run_id: str) -> Dict[str, Any]:
+    """Load summary data and merge in full artifacts for UI display."""
+    summary = client.get_run(run_id)
+
+    try:
+        full_run = client.get_run_full(run_id)
+    except Exception:
+        return summary
+
+    artifacts = full_run.get("state", {}).get("artifacts")
+    if artifacts is None:
+        return summary
+
+    merged = dict(summary)
+    merged["artifacts"] = artifacts
+    return merged
+
+
 # =============================================================================
 # API Client
 # =============================================================================
@@ -43,6 +89,7 @@ class BlackboardClient:
     """Client for Blackboard API."""
     
     def __init__(self, base_url: str = DEFAULT_API_URL):
+        _require_httpx()
         self.base_url = base_url.rstrip("/")
         self.client = httpx.Client(timeout=30.0)
     
@@ -69,11 +116,17 @@ class BlackboardClient:
         response.raise_for_status()
         return response.json()
     
-    def resume_run(self, run_id: str, user_input: Optional[Dict] = None) -> Dict[str, Any]:
+    def get_run_full(self, run_id: str) -> Dict[str, Any]:
+        """Get full run state including artifacts."""
+        response = self.client.get(f"{self.base_url}/runs/{run_id}/full")
+        response.raise_for_status()
+        return response.json()
+
+    def resume_run(self, run_id: str, answer: str, max_steps: int = 20) -> Dict[str, Any]:
         """Resume a paused run."""
         response = self.client.post(
             f"{self.base_url}/runs/{run_id}/resume",
-            json={"user_input": user_input or {}}
+            json={"answer": answer, "max_steps": max_steps}
         )
         response.raise_for_status()
         return response.json()
@@ -97,6 +150,7 @@ class BlackboardClient:
 
 def render_sidebar():
     """Render the sidebar with configuration."""
+    _require_streamlit()
     st.sidebar.title("⚡ Blackboard UI")
     st.sidebar.markdown("---")
     
@@ -156,6 +210,7 @@ def render_sidebar():
 
 def render_chat_interface():
     """Render the main chat interface."""
+    _require_streamlit()
     st.header("💬 Goal Setting")
     
     # Goal input
@@ -178,8 +233,9 @@ def render_chat_interface():
                 result = client.start_run(goal, max_steps)
                 client.close()
                 
-                st.session_state.current_run_id = result.get("run_id")
-                st.success(f"Run started: {result.get('run_id')}")
+                run_id = extract_run_id(result)
+                st.session_state.current_run_id = run_id
+                st.success(f"Run started: {run_id}")
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to start run: {e}")
@@ -187,6 +243,7 @@ def render_chat_interface():
 
 def render_run_status():
     """Render the current run status."""
+    _require_streamlit()
     run_id = st.session_state.get("current_run_id")
     if not run_id:
         st.info("No active run. Start a new goal above.")
@@ -196,7 +253,7 @@ def render_run_status():
     
     try:
         client = BlackboardClient(st.session_state.get("api_url", DEFAULT_API_URL))
-        run_data = client.get_run(run_id)
+        run_data = load_run_view_data(client, run_id)
         client.close()
         
         # Status display
@@ -252,6 +309,7 @@ def render_run_status():
 
 def render_human_loop(run_id: str, run_data: Dict):
     """Render human-in-the-loop input form."""
+    _require_streamlit()
     st.warning("⏸️ Run paused - Human input required")
     
     pending = run_data.get("pending_input", {})
@@ -271,7 +329,7 @@ def render_human_loop(run_id: str, run_data: Dict):
         if submitted and user_response:
             try:
                 client = BlackboardClient(st.session_state.get("api_url", DEFAULT_API_URL))
-                client.resume_run(run_id, {"response": user_response})
+                client.resume_run(run_id, user_response)
                 client.close()
                 st.success("Response submitted! Resuming run...")
                 st.rerun()
@@ -281,6 +339,7 @@ def render_human_loop(run_id: str, run_data: Dict):
 
 def render_artifacts(artifacts: List[Dict]):
     """Render artifacts in tabs."""
+    _require_streamlit()
     if not artifacts:
         return
     
@@ -344,6 +403,7 @@ def render_artifacts(artifacts: List[Dict]):
 
 def render_live_feed():
     """Render real-time event feed."""
+    _require_streamlit()
     run_id = st.session_state.get("current_run_id")
     if not run_id:
         return
@@ -366,6 +426,7 @@ def render_live_feed():
 
 def main():
     """Main Streamlit app."""
+    _require_streamlit()
     st.set_page_config(
         page_title="Blackboard UI",
         page_icon="⚡",

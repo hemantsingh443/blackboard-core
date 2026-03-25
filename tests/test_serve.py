@@ -6,6 +6,7 @@ Comprehensive tests for the FastAPI endpoints and SessionManager.
 
 import asyncio
 import json
+import time
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Optional
@@ -252,6 +253,78 @@ class TestBlackboardAPI:
         
         assert response.status_code == 200
         assert response.json()["status"] == "cancelled"
+
+    def test_stream_completed_run_emits_complete_event(self, test_client):
+        """Test SSE immediately completes for an already-finished run."""
+        create_response = test_client.post("/runs", json={"goal": "Stream goal"})
+        run_id = create_response.json()["id"]
+
+        for _ in range(50):
+            run_response = test_client.get(f"/runs/{run_id}")
+            if run_response.json()["status"] == "completed":
+                break
+            time.sleep(0.01)
+
+        with test_client.stream("GET", f"/runs/{run_id}/stream") as response:
+            lines = []
+            for line in response.iter_lines():
+                if line:
+                    lines.append(line)
+                if line == "event: complete":
+                    break
+
+        payload = "\n".join(lines)
+        assert "event: status" in payload
+        assert "event: complete" in payload
+
+    def test_stream_active_run_emits_event_and_complete(self, mock_orchestrator_factory):
+        """Test SSE emits live events and then completes."""
+        pytest.importorskip("fastapi")
+        pytest.importorskip("sse_starlette")
+
+        from fastapi.testclient import TestClient
+        from blackboard.events import Event, EventBus, EventType
+        from blackboard.serve.app import create_app
+
+        def streaming_factory():
+            mock_orch = MagicMock()
+            mock_orch.event_bus = EventBus()
+
+            async def mock_run(goal=None, state=None, max_steps=20):
+                bb = state or Blackboard(goal=goal or "test")
+                await mock_orch.event_bus.publish_async(
+                    Event(EventType.STEP_STARTED, {"goal": bb.goal})
+                )
+                await asyncio.sleep(0.05)
+                bb.update_status(Status.DONE)
+                return bb
+
+            mock_orch.run = mock_run
+            return mock_orch
+
+        with patch("blackboard.serve.app.importlib.import_module") as mock_import:
+            mock_module = MagicMock()
+            mock_module.create_orchestrator = streaming_factory
+            mock_import.return_value = mock_module
+
+            app = create_app("test_module:create_orchestrator")
+
+            with TestClient(app, raise_server_exceptions=False) as client:
+                create_response = client.post("/runs", json={"goal": "Stream goal"})
+                run_id = create_response.json()["id"]
+
+                with client.stream("GET", f"/runs/{run_id}/stream") as response:
+                    lines = []
+                    for line in response.iter_lines():
+                        if line:
+                            lines.append(line)
+                        if line == "event: complete":
+                            break
+
+        payload = "\n".join(lines)
+        assert "event: status" in payload
+        assert "event: step_started" in payload
+        assert "event: complete" in payload
 
 
 # ============================================================================

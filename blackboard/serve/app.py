@@ -270,6 +270,12 @@ def create_app(
         session = manager.get_session(run_id)
         if not session:
             raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+
+        terminal_statuses = (
+            RunStatus.COMPLETED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED
+        )
         
         async def event_generator():
             """Generate SSE events from session queue."""
@@ -280,10 +286,24 @@ def create_app(
                 "event": "status",
                 "data": json.dumps(session.to_dict())
             }
+
+            if session.status in terminal_statuses:
+                yield {
+                    "event": "complete",
+                    "data": json.dumps(session.to_dict())
+                }
+                return
             
             # Stream events
             while True:
                 try:
+                    if session.status in terminal_statuses and session._event_queue.empty():
+                        yield {
+                            "event": "complete",
+                            "data": json.dumps(session.to_dict())
+                        }
+                        break
+
                     # Wait for next event with timeout
                     event = await asyncio.wait_for(
                         session._event_queue.get(),
@@ -295,11 +315,7 @@ def create_app(
                     }
                     
                     # Check if session is complete
-                    if session.status in (
-                        RunStatus.COMPLETED,
-                        RunStatus.FAILED,
-                        RunStatus.CANCELLED
-                    ):
+                    if session.status in terminal_statuses:
                         yield {
                             "event": "complete",
                             "data": json.dumps(session.to_dict())
@@ -312,6 +328,12 @@ def create_app(
                     break
                         
                 except asyncio.TimeoutError:
+                    if session.status in terminal_statuses:
+                        yield {
+                            "event": "complete",
+                            "data": json.dumps(session.to_dict())
+                        }
+                        break
                     # Send keepalive
                     yield {
                         "event": "ping",
