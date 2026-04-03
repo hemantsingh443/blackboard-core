@@ -93,27 +93,29 @@ pip install blackboard-core[all]        # Everything
 
 ```python
 from blackboard import Orchestrator, worker
-from blackboard.llm import LiteLLMClient
 
-# Define workers with simple type hints - schemas are auto-generated!
+
+class SimpleLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            return '{"action": "call", "worker": "Write", "inputs": {"topic": "AI safety"}, "reasoning": "Draft the article"}'
+        return '{"action": "done", "reasoning": "Article complete"}'
+
 @worker
 def write(topic: str) -> str:
     """Writes content about a topic."""
-    return f"Article about {topic}..."
+    return f"Article about {topic}"
 
-@worker
-def critique(content: str) -> str:
-    """Reviews content for quality."""
-    return "Approved!" if len(content) > 50 else "Needs more detail"
-
-# Create orchestrator
-llm = LiteLLMClient(model="gpt-4o")
-orchestrator = Orchestrator(llm=llm, workers=[write, critique])
-
-# Run
+orchestrator = Orchestrator(llm=SimpleLLM(), workers=[write])
 result = orchestrator.run_sync(goal="Write about AI safety")
 print(result.artifacts[-1].content)
 ```
+
+Swap `SimpleLLM` for your real provider in production, for example `LiteLLMClient(model="gpt-4o")`.
 
 ## Core Concepts
 
@@ -177,23 +179,27 @@ strategy = ChainOfThoughtStrategy()
 
 ## State Persistence
 
-Save and resume sessions reliably:
+Persist after every step and on terminal exit:
 
 ```python
+from blackboard import Blackboard
 from blackboard.persistence import SQLitePersistence
 
-# Use SQLite for production (supports concurrent access)
 persistence = SQLitePersistence("./blackboard.db")
 await persistence.initialize()
 orchestrator.set_persistence(persistence)
 
-# Save with ID
-await persistence.save(state, "session-123")
+state = Blackboard(goal="Write about AI safety")
+state.metadata["session_id"] = "session-123"
+
+# Saves the latest state on every step and again on DONE / FAILED / PAUSED
+result = await orchestrator.run(state=state, max_steps=10)
 
 # Resume later
-state = await persistence.load("session-123")
-result = await orchestrator.run(state=state)
+restored = await persistence.load("session-123")
 ```
+
+If you also set `auto_save_path`, the same final state is written to JSON alongside your persistence backend. Checkpoint-capable backends also snapshot terminal states automatically.
 
 ## Advanced Features
 
@@ -206,7 +212,7 @@ orchestrator = Orchestrator(
     llm=my_llm,
     workers=[...],
     middleware=[
-        BudgetMiddleware(max_tokens=100000),
+        BudgetMiddleware(max_tokens=100000, max_cost_usd=5.0),
         HumanApprovalMiddleware(require_approval_for=["Deployer"])
     ]
 )
@@ -247,16 +253,23 @@ workers = fs_server.expand_to_workers()
 ### Blueprints (Workflow Patterns)
 
 ```python
-from blackboard.flow import SequentialPipeline, Router
+from blackboard.flow import SequentialPipeline
 
-# Force A → B → C execution
-pipeline = SequentialPipeline([Searcher(), Writer(), Critic()])
+pipeline = SequentialPipeline([research, draft])
 
-# Let supervisor choose best worker
-router = Router([MathAgent(), CodeAgent(), ResearchAgent()])
-
-result = await orchestrator.run(goal="...", blueprint=pipeline)
+# The final phase auto-completes the run after the last successful worker call
+result = await orchestrator.run(goal="Research and draft", blueprint=pipeline)
 ```
+
+Set `allow_skip_to_done=False` on a custom `Blueprint` when you want to forbid early `done` decisions until every phase is complete.
+
+## Behavior Guarantees
+
+- Blueprint steps advance after one successful worker call or one successful `call_independent` batch unless you define a custom `exit_condition`.
+- When `allow_skip_to_done=False`, early `done` decisions are rejected and the supervisor is re-asked once with a correction.
+- With `auto_save_path` and/or `set_persistence(...)`, Blackboard persists after each non-terminal step and again on terminal `done`, `failed`, or `paused` exit paths.
+- `state.metadata["last_usage"]` is the canonical per-call usage record with `input_tokens`, `output_tokens`, `model`, and `context`. Auto-summarization contributes to budget tracking too.
+- Tool calling only exposes workers allowed in the current blueprint phase, and JSON fallback preserves the same blueprint restrictions.
 
 ## Configuration
 

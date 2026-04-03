@@ -96,3 +96,62 @@ class TestConsoleLoggingMiddleware:
         # Should not crash
         result = await orchestrator.run(goal="Test goal", max_steps=1)
         assert result is not None
+
+    @pytest.mark.asyncio
+    async def test_middleware_handles_call_path(self):
+        """Console logging should handle worker-call decisions without crashing."""
+        class CallLLM:
+            def __init__(self):
+                self.call_count = 0
+
+            def generate(self, prompt):
+                self.call_count += 1
+                if self.call_count == 1:
+                    return '{"action": "call", "worker": "Dummy", "instructions": "Work"}'
+                return '{"action": "done", "reasoning": "Complete"}'
+
+        class DummyWorker(Worker):
+            name = "Dummy"
+            description = "Does nothing"
+
+            async def run(self, state, inputs=None):
+                return WorkerOutput(
+                    artifact=Artifact(type="test", content="done", creator=self.name)
+                )
+
+        orchestrator = Orchestrator(
+            llm=CallLLM(),
+            workers=[DummyWorker()],
+            middleware=[ConsoleLoggingMiddleware(use_colors=False)]
+        )
+
+        result = await orchestrator.run(goal="Test goal", max_steps=3)
+
+        assert result.status is not None
+        assert len(result.artifacts) == 1
+
+    @pytest.mark.asyncio
+    async def test_middleware_handles_fail_path(self):
+        """Console logging should handle fail decisions without crashing."""
+        class FailLLM:
+            def generate(self, prompt):
+                return '{"action": "fail", "reasoning": "Cannot continue"}'
+
+        class DummyWorker(Worker):
+            name = "Dummy"
+            description = "Does nothing"
+
+            async def run(self, state, inputs=None):
+                return WorkerOutput(
+                    artifact=Artifact(type="test", content="done", creator=self.name)
+                )
+
+        orchestrator = Orchestrator(
+            llm=FailLLM(),
+            workers=[DummyWorker()],
+            middleware=[ConsoleLoggingMiddleware(use_colors=False)]
+        )
+
+        result = await orchestrator.run(goal="Test goal", max_steps=1)
+
+        assert result.status is not None

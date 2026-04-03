@@ -120,7 +120,7 @@ class Step:
         Returns True if:
         - exit_condition is defined and returns True
         - max_iterations reached
-        - No exit_condition and at least one artifact was created
+        - No exit_condition and the current phase completed successfully
         """
         # Check iteration limit
         step_iterations = state.metadata.get(f"_step_{self.name}_iterations", 0)
@@ -136,9 +136,8 @@ class Step:
                 logger.error(f"Exit condition error in step '{self.name}': {e}")
                 return False
         
-        # Default: advance if any artifact was created this step
-        # This requires tracking which artifacts belong to this step
-        return False
+        # Default: advance after one successful worker/batch execution.
+        return bool(state.metadata.get(f"_step_{self.name}_completed", False))
     
     def to_prompt_context(self) -> str:
         """Generate the context string to inject into the system prompt."""
@@ -216,6 +215,23 @@ class Blueprint:
         """Check if the blueprint has completed all steps."""
         index = self.get_current_step_index(state)
         return index >= len(self.steps)
+
+    def is_worker_allowed(self, worker_name: str, state: Blackboard) -> bool:
+        """Check whether a worker is allowed in the current phase."""
+        if self.is_complete(state):
+            return False
+        return worker_name in self.filter_workers([worker_name], state)
+
+    def can_finish(self, state: Blackboard) -> bool:
+        """Check whether the supervisor may legally mark the workflow done."""
+        return self.allow_skip_to_done or self.is_complete(state)
+
+    def mark_current_step_completed(self, state: Blackboard) -> None:
+        """Record that the current phase completed successfully."""
+        if self.is_complete(state):
+            return
+        current_step = self.get_current_step(state)
+        state.metadata[f"_step_{current_step.name}_completed"] = True
     
     def advance_step(self, state: Blackboard) -> Optional[Step]:
         """
@@ -235,8 +251,9 @@ class Blueprint:
             new_index = current_index + 1
             state.metadata["_blueprint_step_index"] = new_index
             
-            # Reset iteration counter for new step
+            # Reset progress markers for the old step
             state.metadata[f"_step_{current_step.name}_iterations"] = 0
+            state.metadata[f"_step_{current_step.name}_completed"] = False
             
             if new_index < len(self.steps):
                 new_step = self.steps[new_index]
@@ -288,6 +305,15 @@ class Blueprint:
         
         This provides the LLM with awareness of the current workflow phase.
         """
+        if self.is_complete(state):
+            return (
+                f"\n\n{'='*50}\n"
+                f"## WORKFLOW: {self.name}\n"
+                f"**Progress**: Complete ({len(self.steps)} of {len(self.steps)} steps)\n"
+                f"You MUST mark the task done unless the overall goal has genuinely failed.\n"
+                f"{'='*50}\n"
+            )
+
         current_step = self.get_current_step(state)
         step_index = self.get_current_step_index(state)
         
@@ -304,6 +330,11 @@ class Blueprint:
             f"**Progress**: {progress}",
             f"**Pipeline**: {steps_overview}",
             current_step.to_prompt_context(),
+            (
+                "You may mark the task done early if the goal is achieved."
+                if self.allow_skip_to_done
+                else "You may NOT mark the task done until all workflow phases are complete."
+            ),
             f"{'='*50}\n"
         ]
         

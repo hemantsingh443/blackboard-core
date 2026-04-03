@@ -7,6 +7,9 @@ from blackboard import (
     Orchestrator, Worker, WorkerOutput, WorkerInput,
     Artifact, Feedback, Blackboard, Status
 )
+from blackboard.flow import Blueprint, Step, SequentialPipeline
+from blackboard.tools import ToolCall
+from blackboard.usage import LLMUsage
 
 
 class MockLLM:
@@ -24,6 +27,42 @@ class MockLLM:
             self.call_index += 1
             return response
         return '{"action": "fail", "reasoning": "No more mock responses"}'
+
+
+class MockToolCallingLLM:
+    """A mock tool-calling LLM that records the exposed tools per step."""
+
+    def __init__(self, tool_responses, json_responses=None, fail_tool_calls: bool = False):
+        self.tool_responses = tool_responses
+        self.json_responses = json_responses or []
+        self.fail_tool_calls = fail_tool_calls
+        self.tool_call_index = 0
+        self.json_call_index = 0
+        self.tool_history = []
+        self.prompts = []
+        self.last_usage = None
+
+    def generate_with_tools(self, prompt, tools):
+        self.prompts.append(prompt)
+        self.tool_history.append([tool.name for tool in tools])
+
+        if self.fail_tool_calls:
+            raise RuntimeError("native tool calling unavailable")
+
+        self.last_usage = LLMUsage(
+            input_tokens=40,
+            output_tokens=10,
+            model="tool-mock"
+        )
+        response = self.tool_responses[self.tool_call_index]
+        self.tool_call_index += 1
+        return response
+
+    def generate(self, prompt):
+        self.prompts.append(prompt)
+        response = self.json_responses[self.json_call_index]
+        self.json_call_index += 1
+        return response
 
 
 class SimpleWriter(Worker):
@@ -167,6 +206,144 @@ class TestOrchestrator:
         assert len(steps_seen) == 2
         assert steps_seen[0][1] == "call"
         assert steps_seen[1][1] == "done"
+
+    @pytest.mark.asyncio
+    async def test_blueprint_advances_after_single_success_and_auto_completes(self):
+        """Blueprint phases should advance after one successful worker call."""
+        writer = SimpleWriter()
+        reviewer = SimpleReviewer(should_pass=True)
+        llm = MockLLM([
+            '{"action": "call", "worker": "Writer", "instructions": "Draft"}',
+            '{"action": "call", "worker": "Reviewer", "instructions": "Review"}',
+        ])
+
+        orchestrator = Orchestrator(llm=llm, workers=[writer, reviewer])
+        blueprint = SequentialPipeline([writer, reviewer])
+
+        result = await orchestrator.run(
+            goal="Write and review",
+            max_steps=5,
+            blueprint=blueprint
+        )
+
+        assert result.status == Status.DONE
+        assert result.metadata["_blueprint_step_index"] == len(blueprint.steps)
+        assert llm.call_index == 2
+        assert len(result.artifacts) == 1
+        assert len(result.feedback) == 1
+
+    @pytest.mark.asyncio
+    async def test_blueprint_blocks_early_done_and_reasks_once(self):
+        """Strict blueprints should reject early done decisions and re-ask."""
+        llm = MockLLM([
+            '{"action": "done", "reasoning": "Looks complete"}',
+            '{"action": "call", "worker": "Writer", "instructions": "Write the draft"}',
+        ])
+
+        strict_blueprint = Blueprint(
+            name="Strict Draft",
+            allow_skip_to_done=False,
+            steps=[
+                Step(
+                    name="draft",
+                    description="Create the first draft",
+                    allowed_workers=["Writer"],
+                    instructions="Use Writer to produce the draft.",
+                    max_iterations=1
+                )
+            ]
+        )
+
+        orchestrator = Orchestrator(llm=llm, workers=[SimpleWriter()])
+        result = await orchestrator.run(
+            goal="Produce a draft",
+            max_steps=3,
+            blueprint=strict_blueprint
+        )
+
+        assert result.status == Status.DONE
+        assert llm.call_index == 2
+        assert "Correction" in llm.prompts[1]
+        assert "You may NOT mark the task done" in llm.prompts[0]
+        assert len(result.artifacts) == 1
+
+    @pytest.mark.asyncio
+    async def test_tool_calling_filters_workers_by_blueprint_phase(self):
+        """Tool calling should only expose workers allowed in the current phase."""
+        writer = SimpleWriter()
+        reviewer = SimpleReviewer(should_pass=True)
+        llm = MockToolCallingLLM([
+            [ToolCall(id="call-1", name="Writer", arguments={"instructions": "Draft"})],
+            [ToolCall(id="call-2", name="Reviewer", arguments={"instructions": "Review"})],
+        ])
+
+        blueprint = Blueprint(
+            name="Strict Pipeline",
+            allow_skip_to_done=False,
+            steps=[
+                Step(name="draft", allowed_workers=["Writer"], max_iterations=1),
+                Step(name="review", allowed_workers=["Reviewer"], max_iterations=1),
+            ]
+        )
+
+        orchestrator = Orchestrator(llm=llm, workers=[writer, reviewer])
+        result = await orchestrator.run(
+            goal="Write then review",
+            max_steps=4,
+            blueprint=blueprint
+        )
+
+        assert result.status == Status.DONE
+        assert llm.tool_history[0] == ["Writer", "mark_failed"]
+        assert llm.tool_history[1] == ["Reviewer", "mark_failed"]
+
+    @pytest.mark.asyncio
+    async def test_tool_calling_fallback_preserves_blueprint_constraints(self):
+        """JSON fallback should keep the active blueprint restrictions."""
+        writer = SimpleWriter()
+
+        class BlockedWorker(Worker):
+            name = "BlockedWorker"
+            description = "Should never be exposed in this phase"
+
+            async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
+                return WorkerOutput(
+                    artifact=Artifact(type="text", content="blocked", creator=self.name)
+                )
+
+        llm = MockToolCallingLLM(
+            tool_responses=[],
+            json_responses=[
+                '{"action": "call", "worker": "Writer", "instructions": "Draft"}'
+            ],
+            fail_tool_calls=True
+        )
+
+        strict_blueprint = Blueprint(
+            name="Fallback Pipeline",
+            allow_skip_to_done=False,
+            steps=[
+                Step(
+                    name="draft",
+                    allowed_workers=["Writer"],
+                    instructions="Only Writer may run in this phase.",
+                    max_iterations=1
+                )
+            ]
+        )
+
+        orchestrator = Orchestrator(llm=llm, workers=[writer, BlockedWorker()])
+        result = await orchestrator.run(
+            goal="Draft with fallback",
+            max_steps=3,
+            blueprint=strict_blueprint
+        )
+
+        assert result.status == Status.DONE
+        assert llm.json_call_index == 1
+        assert "Writer" in llm.prompts[-1]
+        assert "BlockedWorker" not in llm.prompts[-1]
+        assert "Only Writer may run in this phase." in llm.prompts[-1]
     
     def test_run_sync(self):
         """Test the synchronous wrapper."""
@@ -254,6 +431,64 @@ class TestParallelExecution:
         
         assert result.status == Status.DONE
         assert SimpleWorker.execution_count == 1
+
+    @pytest.mark.asyncio
+    async def test_parallel_batch_advances_blueprint_once(self):
+        """A successful parallel batch should count as one blueprint iteration."""
+
+        class ResearcherA(Worker):
+            name = "ResearcherA"
+            description = "Researches topic A"
+            parallel_safe = True
+
+            async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
+                return WorkerOutput(
+                    artifact=Artifact(type="research", content="A", creator=self.name)
+                )
+
+        class ResearcherB(Worker):
+            name = "ResearcherB"
+            description = "Researches topic B"
+            parallel_safe = True
+
+            async def run(self, state: Blackboard, inputs: Optional[WorkerInput] = None) -> WorkerOutput:
+                return WorkerOutput(
+                    artifact=Artifact(type="research", content="B", creator=self.name)
+                )
+
+        llm = MockLLM([
+            '{"action": "call_independent", "calls": [{"worker": "ResearcherA", "instructions": "A"}, {"worker": "ResearcherB", "instructions": "B"}], "reasoning": "Run both"}'
+        ])
+
+        blueprint = Blueprint(
+            name="Parallel Research",
+            allow_skip_to_done=False,
+            steps=[
+                Step(
+                    name="research",
+                    allowed_workers=["ResearcherA", "ResearcherB"],
+                    instructions="Run the researchers in one batch.",
+                    max_iterations=5
+                )
+            ]
+        )
+
+        orchestrator = Orchestrator(
+            llm=llm,
+            workers=[ResearcherA(), ResearcherB()],
+            enable_parallel=True
+        )
+
+        result = await orchestrator.run(
+            goal="Research both topics",
+            max_steps=3,
+            blueprint=blueprint
+        )
+
+        assert result.status == Status.DONE
+        assert result.step_count == 1
+        assert result.metadata["_blueprint_step_index"] == 1
+        assert len(result.artifacts) == 2
 
 
 class TestWorkerInput:

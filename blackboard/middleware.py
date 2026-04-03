@@ -242,20 +242,29 @@ class BudgetMiddleware(Middleware):
     
     async def after_step(self, ctx: StepContext) -> None:
         """Update accumulated costs after each step completes."""
-        usage = ctx.state.metadata.get("last_usage", {})
-        model = ctx.state.metadata.get("last_model", "gpt-4o-mini")
-        
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        
-        # Use model-aware pricing
-        input_per_1k, output_per_1k = self._get_model_cost(model)
-        step_cost = (
-            (input_tokens / 1000) * input_per_1k +
-            (output_tokens / 1000) * output_per_1k
-        )
-        
-        self.total_tokens += input_tokens + output_tokens
+        usage_records = ctx.state.metadata.get("_step_usage_records") or []
+        if not usage_records:
+            last_usage = ctx.state.metadata.get("last_usage")
+            usage_records = [last_usage] if last_usage else []
+
+        step_tokens = 0
+        step_cost = 0.0
+        for usage in usage_records:
+            if not usage:
+                continue
+
+            input_tokens = usage.get("input_tokens", 0)
+            output_tokens = usage.get("output_tokens", 0)
+            model = usage.get("model", "gpt-4o-mini")
+
+            input_per_1k, output_per_1k = self._get_model_cost(model)
+            step_tokens += input_tokens + output_tokens
+            step_cost += (
+                (input_tokens / 1000) * input_per_1k +
+                (output_tokens / 1000) * output_per_1k
+            )
+
+        self.total_tokens += step_tokens
         self.total_cost += step_cost
         
         # Update metadata for visibility
@@ -569,12 +578,16 @@ class ConsoleLoggingMiddleware(Middleware):
         if ctx.decision:
             action = ctx.decision.action
             if action == "call":
-                workers = ", ".join(ctx.decision.workers or [])
+                workers = ", ".join(call.worker_name for call in ctx.decision.calls)
                 print(f"{self._c('green', '✓ Decision:')} call [{self._c('magenta', workers)}]")
+            elif action == "call_independent":
+                workers = ", ".join(call.worker_name for call in ctx.decision.calls)
+                print(f"{self._c('green', '✓ Decision:')} parallel [{self._c('magenta', workers)}]")
             elif action == "done":
                 print(f"{self._c('green', '✓ Decision:')} {self._c('bold', 'DONE')}")
             elif action == "fail":
-                print(f"{self._c('red', '✗ Decision:')} FAIL - {ctx.decision.reason}")
+                reason = ctx.decision.reasoning or "No reason provided"
+                print(f"{self._c('red', '✗ Decision:')} FAIL - {reason}")
             else:
                 print(f"{self._c('yellow', '? Decision:')} {action}")
         

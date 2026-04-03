@@ -14,7 +14,7 @@ Complete API reference and usage guide for building LLM-powered multi-agent syst
 
 **State & Persistence** 7. [Persistence](#persistence) 8. [Memory System](#memory-system)
 
-**Orchestration** 9. [Middleware](#middleware) 10. [Reasoning Strategies](#reasoning-strategies) 11. [Blueprints](#blueprints) 12. [Tool Calling](#tool-calling)
+**Orchestration** 9. [Middleware](#middleware) 10. [Behavior Guarantees](#behavior-guarantees) 11. [Reasoning Strategies](#reasoning-strategies) 12. [Blueprints](#blueprints) 13. [Tool Calling](#tool-calling)
 
 **Advanced Patterns** 13. [Fractal Agents](#fractal-agents) 14. [Model Context Protocol](#model-context-protocol) 15. [Swarm Intelligence](#swarm-intelligence)
 
@@ -102,27 +102,29 @@ state = Blackboard(goal="Write a technical blog post")
 
 ```python
 from blackboard import Orchestrator, worker
-from blackboard.llm import LiteLLMClient
 
-# Define workers with simple type hints
+
+class SimpleLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def generate(self, prompt: str) -> str:
+        self.calls += 1
+        if self.calls == 1:
+            return '{"action": "call", "worker": "Write", "inputs": {"topic": "AI safety"}, "reasoning": "Draft the article"}'
+        return '{"action": "done", "reasoning": "Article complete"}'
+
 @worker
 def write(topic: str) -> str:
     """Writes content about a topic."""
-    return f"Article about {topic}..."
+    return f"Article about {topic}"
 
-@worker
-def critique(content: str) -> str:
-    """Reviews content for quality."""
-    return "Approved!" if len(content) > 50 else "Needs more detail"
-
-# Create orchestrator
-llm = LiteLLMClient(model="gpt-4o")
-orchestrator = Orchestrator(llm=llm, workers=[write, critique])
-
-# Run
+orchestrator = Orchestrator(llm=SimpleLLM(), workers=[write])
 result = orchestrator.run_sync(goal="Write about AI safety")
 print(result.artifacts[-1].content)
 ```
+
+Replace `SimpleLLM` with your production client when you are ready, for example `LiteLLMClient(model="gpt-4o")`.
 
 ---
 
@@ -328,6 +330,7 @@ result = await orchestrator.run(state=existing_state, max_steps=10)
 ### SQLite Persistence (Recommended)
 
 ```python
+from blackboard import Blackboard
 from blackboard.persistence import SQLitePersistence
 
 persistence = SQLitePersistence("./blackboard.db")
@@ -336,15 +339,20 @@ await persistence.initialize()
 # Attach to orchestrator
 orchestrator.set_persistence(persistence)
 
-# Save session
-await persistence.save(state, "session-123", parent_session_id="parent-001")
+state = Blackboard(goal="Write an article")
+state.metadata["session_id"] = "session-123"
 
-# Load session
-state = await persistence.load("session-123")
+# The orchestrator saves after each step and again on DONE / FAILED / PAUSED
+result = await orchestrator.run(state=state, max_steps=10)
+
+# Load the latest persisted state
+restored = await persistence.load("session-123")
 
 # List sessions
 sessions = await persistence.list_sessions()
 ```
+
+If you also set `auto_save_path`, the same final state is written to JSON. Checkpoint-capable persistence backends also snapshot terminal states automatically.
 
 ### PostgreSQL (Distributed)
 
@@ -370,12 +378,8 @@ persistence = RedisPersistence(
 ### Pause/Resume Pattern
 
 ```python
-# Pause: Save state and stop
-await persistence.save(state, "session-123")
-
-# Resume: Load and run
 loaded_state = await persistence.load("session-123")
-result = await orchestrator.run(state=loaded_state)
+result = await orchestrator.run(state=loaded_state, max_steps=10)
 ```
 
 ### Optimistic Locking
@@ -473,6 +477,15 @@ budget = BudgetMiddleware(
 orchestrator = Orchestrator(llm=llm, workers=workers, middleware=[budget])
 ```
 
+`BudgetMiddleware` reads the canonical `state.metadata["last_usage"]` payload written by internal LLM calls. That payload contains:
+
+- `input_tokens`
+- `output_tokens`
+- `model`
+- `context`
+
+Auto-summarization usage counts toward the same budget totals.
+
 ### Human Approval Middleware
 
 ```python
@@ -497,6 +510,16 @@ summarizer = AutoSummarizationMiddleware(
     step_threshold=50
 )
 ```
+
+---
+
+## Behavior Guarantees
+
+- Default blueprint behavior: a step advances after one successful worker call, or one successful `call_independent` batch, unless that step defines a custom `exit_condition`.
+- Strict workflows: when `Blueprint.allow_skip_to_done=False`, early `done` decisions are rejected and the supervisor is re-asked once with a corrective prompt.
+- Persistence: if `auto_save_path` and/or `set_persistence(...)` is configured, Blackboard saves after each non-terminal step and again on terminal `done`, `failed`, and `paused` exits.
+- Usage tracking: `state.metadata["last_usage"]` is the documented per-call usage contract. The latest internal LLM call overwrites it, and the current step also keeps `_step_usage_records` for budget aggregation.
+- Budgets: `BudgetMiddleware` uses the recorded usage metadata, so supervisor JSON calls, tool-calling decisions, and auto-summarization all contribute to token and cost limits.
 
 ### Custom Middleware
 
@@ -544,15 +567,18 @@ config = BlackboardConfig(reasoning_strategy="cot")
 
 Blueprints constrain the orchestrator to follow specific patterns.
 
+- Workers are filtered per active phase in both JSON and tool-calling supervisor modes.
+- The last successful phase auto-completes the run; you do not need an extra supervisor `done` decision after the final step.
+- Set `allow_skip_to_done=False` to require the blueprint to complete before the run can finish.
+
 ### Sequential Pipeline
 
 ```python
 from blackboard.flow import SequentialPipeline
 
 pipeline = SequentialPipeline([
-    SearchWorker(),
-    WriterWorker(),
-    CriticWorker()
+    research,
+    draft
 ])
 
 result = await orchestrator.run(goal="Research and write", blueprint=pipeline)
@@ -583,6 +609,8 @@ from blackboard.tools import workers_to_tool_definitions
 
 tools = workers_to_tool_definitions([ResearchWorker(), CriticWorker()])
 ```
+
+When a blueprint is active, the exposed tool list is filtered to the workers allowed in the current phase. If native tool calling fails and JSON fallback is enabled, the same blueprint restrictions are preserved in the fallback prompt.
 
 ---
 

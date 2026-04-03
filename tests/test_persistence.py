@@ -4,7 +4,11 @@ import pytest
 import tempfile
 from pathlib import Path
 
-from blackboard import Blackboard, Artifact, Feedback, Status
+from blackboard import (
+    Blackboard, Artifact, Feedback, Status,
+    Orchestrator, Worker, WorkerInput, WorkerOutput,
+    LLMResponse, LLMUsage
+)
 
 
 class TestPersistence:
@@ -145,6 +149,31 @@ class TestHistoryManagement:
         assert "Steps: 10" in summary
         assert "Artifacts: 1" in summary
         assert "Passed" in summary
+
+
+class PersistenceWorker(Worker):
+    """Creates a small artifact so orchestration has state to persist."""
+
+    name = "PersistenceWorker"
+    description = "Writes a persisted artifact"
+
+    async def run(self, state: Blackboard, inputs: WorkerInput = None) -> WorkerOutput:
+        return WorkerOutput(
+            artifact=Artifact(type="text", content="persisted", creator=self.name)
+        )
+
+
+class TerminalDecisionLLM:
+    """Returns a single terminal decision with usage metadata."""
+
+    def __init__(self, action: str):
+        self.action = action
+
+    def generate(self, prompt: str):
+        return LLMResponse(
+            content=f'{{"action": "{self.action}", "reasoning": "terminal"}}',
+            usage=LLMUsage(input_tokens=12, output_tokens=4, model="persistence-test")
+        )
 
 
 # =============================================================================
@@ -409,5 +438,75 @@ class TestSQLitePersistence:
         
         assert row[0].lower() == "wal"
         
+        await persistence.close()
+
+
+class TestOrchestratorPersistenceContracts:
+    """Persistence guarantees for terminal orchestrator states."""
+
+    @pytest.mark.asyncio
+    async def test_terminal_done_is_persisted_to_json_and_sqlite(self, tmp_path):
+        """DONE states should be saved to both configured persistence backends."""
+        from blackboard.persistence import SQLitePersistence
+
+        auto_save_path = tmp_path / "done.json"
+        persistence = SQLitePersistence(str(tmp_path / "done.db"))
+
+        state = Blackboard(goal="Persist done state")
+        state.metadata["session_id"] = "done-session"
+
+        orchestrator = Orchestrator(
+            llm=TerminalDecisionLLM("done"),
+            workers=[PersistenceWorker()],
+            auto_save_path=str(auto_save_path)
+        )
+        orchestrator.set_persistence(persistence)
+
+        result = await orchestrator.run(state=state, max_steps=2)
+
+        json_state = Blackboard.load_from_json(auto_save_path)
+        sqlite_state = await persistence.load("done-session")
+        checkpoints = await persistence.list_checkpoints("done-session")
+        checkpoint_state = await persistence.load_state_at_step("done-session", result.step_count)
+
+        assert result.status == Status.DONE
+        assert json_state.status == Status.DONE
+        assert sqlite_state.status == Status.DONE
+        assert result.step_count in checkpoints
+        assert checkpoint_state.status == Status.DONE
+
+        await persistence.close()
+
+    @pytest.mark.asyncio
+    async def test_terminal_failed_is_persisted_to_json_and_sqlite(self, tmp_path):
+        """FAILED states should be saved to both configured persistence backends."""
+        from blackboard.persistence import SQLitePersistence
+
+        auto_save_path = tmp_path / "failed.json"
+        persistence = SQLitePersistence(str(tmp_path / "failed.db"))
+
+        state = Blackboard(goal="Persist failed state")
+        state.metadata["session_id"] = "failed-session"
+
+        orchestrator = Orchestrator(
+            llm=TerminalDecisionLLM("fail"),
+            workers=[PersistenceWorker()],
+            auto_save_path=str(auto_save_path)
+        )
+        orchestrator.set_persistence(persistence)
+
+        result = await orchestrator.run(state=state, max_steps=2)
+
+        json_state = Blackboard.load_from_json(auto_save_path)
+        sqlite_state = await persistence.load("failed-session")
+        checkpoints = await persistence.list_checkpoints("failed-session")
+        checkpoint_state = await persistence.load_state_at_step("failed-session", result.step_count)
+
+        assert result.status == Status.FAILED
+        assert json_state.status == Status.FAILED
+        assert sqlite_state.status == Status.FAILED
+        assert result.step_count in checkpoints
+        assert checkpoint_state.status == Status.FAILED
+
         await persistence.close()
 

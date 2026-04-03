@@ -88,6 +88,7 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.kwargs = kwargs
+        self.last_usage: Optional[LLMUsage] = None
         
         # Set API key if provided
         if api_key:
@@ -120,13 +121,14 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
                 **self.kwargs
             )
             
+            self.last_usage = LLMUsage(
+                input_tokens=response.usage.prompt_tokens,
+                output_tokens=response.usage.completion_tokens,
+                model=response.model
+            )
             return LLMResponse(
                 content=response.choices[0].message.content or "",
-                usage=LLMUsage(
-                    input_tokens=response.usage.prompt_tokens,
-                    output_tokens=response.usage.completion_tokens,
-                    model=response.model
-                ),
+                usage=self.last_usage,
                 metadata={"finish_reason": response.choices[0].finish_reason}
             )
             
@@ -157,13 +159,14 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
                 **self.kwargs
             )
             
+            self.last_usage = LLMUsage(
+                input_tokens=response.usage.prompt_tokens,
+                output_tokens=response.usage.completion_tokens,
+                model=response.model
+            )
             return LLMResponse(
                 content=response.choices[0].message.content or "",
-                usage=LLMUsage(
-                    input_tokens=response.usage.prompt_tokens,
-                    output_tokens=response.usage.completion_tokens,
-                    model=response.model
-                ),
+                usage=self.last_usage,
                 metadata={"finish_reason": response.choices[0].finish_reason}
             )
             
@@ -240,6 +243,11 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
                 timeout=self.timeout,
                 **self.kwargs
             )
+            self.last_usage = LLMUsage(
+                input_tokens=response.usage.prompt_tokens,
+                output_tokens=response.usage.completion_tokens,
+                model=response.model
+            )
             
             message = response.choices[0].message
             
@@ -295,6 +303,11 @@ class LiteLLMClient(LLMClient, StreamingLLMClient, ToolCallingLLMClient):
                 max_tokens=self.max_tokens,
                 timeout=self.timeout,
                 **self.kwargs
+            )
+            self.last_usage = LLMUsage(
+                input_tokens=response.usage.prompt_tokens,
+                output_tokens=response.usage.completion_tokens,
+                model=response.model
             )
             
             message = response.choices[0].message

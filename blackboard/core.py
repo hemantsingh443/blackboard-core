@@ -551,6 +551,119 @@ class Orchestrator:
         
         return definitions
 
+    def _reset_step_usage_tracking(self, state: Blackboard) -> None:
+        """Reset per-step usage tracking before starting a new step."""
+        state.metadata["_step_usage_records"] = []
+
+    def _record_usage(
+        self,
+        state: Blackboard,
+        usage: Optional[LLMUsage],
+        context: str
+    ) -> None:
+        """Record usage on state metadata and the optional usage tracker."""
+        if usage is None:
+            return
+
+        payload = {
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "model": usage.model,
+            "context": context,
+        }
+        state.metadata["last_usage"] = payload
+        state.metadata.setdefault("_step_usage_records", []).append(dict(payload))
+
+        if self.usage_tracker:
+            self.usage_tracker.record(usage, context=context)
+
+    def _record_usage_from_client(self, state: Blackboard, context: str) -> None:
+        """Record usage exposed by an LLM client after a tool-calling request."""
+        usage = getattr(self.llm, "last_usage", None)
+        if isinstance(usage, LLMUsage):
+            self._record_usage(state, usage, context=context)
+
+    def _get_allowed_workers_for_state(
+        self,
+        state: Blackboard,
+        blueprint: Optional["Blueprint"] = None
+    ) -> List[Worker]:
+        """Get the workers available for the current state."""
+        if blueprint is None:
+            return list(self.registry)
+
+        allowed_names = blueprint.filter_workers(list(self.registry.list_workers().keys()), state)
+        return self.registry.get_many(allowed_names)
+
+    def _get_tool_definitions_for_state(
+        self,
+        state: Blackboard,
+        blueprint: Optional["Blueprint"] = None
+    ) -> List[ToolDefinition]:
+        """Build the tool list exposed to the supervisor for the current state."""
+        tool_definitions = self._build_tool_definitions(
+            self._get_allowed_workers_for_state(state, blueprint)
+        )
+
+        if blueprint is None or blueprint.can_finish(state):
+            tool_definitions.append(DONE_TOOL)
+        tool_definitions.append(FAIL_TOOL)
+        return tool_definitions
+
+    def _validate_blueprint_decision(
+        self,
+        decision: SupervisorDecision,
+        state: Blackboard,
+        blueprint: Optional["Blueprint"]
+    ) -> Optional[str]:
+        """Validate a supervisor decision against the active blueprint."""
+        if blueprint is None:
+            return None
+
+        if blueprint.is_complete(state):
+            if decision.action in ("done", "fail"):
+                return None
+            return "The workflow is already complete. Mark the task done or fail explicitly."
+
+        if decision.action == "done" and not blueprint.can_finish(state):
+            current_step = blueprint.get_current_step(state)
+            return (
+                f"You may not mark the task done during workflow phase '{current_step.name}'. "
+                "Complete the current phase with an allowed worker instead."
+            )
+
+        if decision.action in ("call", "call_independent"):
+            invalid_workers = [
+                call.worker_name
+                for call in decision.calls
+                if not blueprint.is_worker_allowed(call.worker_name, state)
+            ]
+            if invalid_workers:
+                allowed = blueprint.filter_workers(list(self.registry.list_workers().keys()), state)
+                return (
+                    f"Invalid worker selection: {', '.join(invalid_workers)}. "
+                    f"You may only call: {', '.join(allowed) if allowed else 'no workers'}."
+                )
+
+        return None
+
+    async def _persist_state(self, state: Blackboard) -> None:
+        """Persist the current state to configured backends."""
+        if self.auto_save_path:
+            state.save_to_json(self.auto_save_path)
+            await self._publish_event(EventType.STATE_SAVED, {"path": self.auto_save_path})
+
+        if self.persistence:
+            session_id = state.metadata.get("session_id", "default")
+            parent_session_id = state.metadata.get("parent_session_id")
+            try:
+                await self.persistence.save(state, session_id, parent_session_id=parent_session_id)
+
+                if hasattr(self.persistence, 'save_checkpoint'):
+                    await self.persistence.save_checkpoint(session_id, state.step_count, state)
+            except Exception as e:
+                logger.warning(f"Persistence save failed: {e}")
+
     async def run(
         self,
         goal: Optional[str] = None,
@@ -573,229 +686,233 @@ class Orchestrator:
         Raises:
             ValueError: If neither goal nor state is provided, or max_steps < 1
         """
-        # Validate max_steps
         if max_steps < 1:
             raise ValueError(f"max_steps must be at least 1, got {max_steps}")
-        
-        # Initialize or resume state
+
         if state is not None:
-            # Resume from existing state
             logger.info(f"Resuming from step {state.step_count}")
             await self._publish_event(EventType.STATE_LOADED, {"step_count": state.step_count})
         elif goal is not None:
             state = Blackboard(goal=goal, status=Status.PLANNING)
         else:
             raise ValueError("Either 'goal' or 'state' must be provided")
-        
-        # Publish start event
+
         await self._publish_event(EventType.ORCHESTRATOR_STARTED, {
             "goal": state.goal,
             "max_steps": max_steps
         })
-        
+
         logger.info(f"Goal: {state.goal}")
         logger.info(f"Workers: {list(self.registry.list_workers().keys())}")
         logger.debug("-" * 50)
-        
-        # Start heartbeat pulse for zombie detection (if persistence supports it)
+
         session_id = state.metadata.get("session_id", "default")
-        await self._start_heartbeat(session_id)
-        
-        for step in range(max_steps):
-            state.increment_step()
-            
-            await self._publish_event(EventType.STEP_STARTED, {"step": state.step_count})
-            logger.debug(f"Step {state.step_count}")
-            
-            # Auto-summarize if enabled and thresholds exceeded
-            if self.auto_summarize and state.should_summarize(
-                artifact_threshold=self.summarize_thresholds.get("artifacts", 10),
-                feedback_threshold=self.summarize_thresholds.get("feedback", 20),
-                step_threshold=self.summarize_thresholds.get("steps", 50)
-            ):
-                await self._auto_summarize(state)
-            
-            # Create step context for middleware
-            step_ctx = StepContext(step_number=state.step_count, state=state)
-            
-            # Before step middleware hook
-            await self.middleware.before_step(step_ctx)
-            if step_ctx.skip_step:
-                logger.debug("Step skipped by middleware")
-                continue
-            
-            # 1. OBSERVE: Build context
-            context = state.to_context_string()
-            
-            # 2. REASON: Ask LLM for next action
-            decision = await self._get_supervisor_decision(context, state, blueprint)
-            step_ctx.decision = decision
-            
-            logger.debug(f"Decision: {decision.action} -> {[c.worker_name for c in decision.calls]}")
-            logger.debug(f"Reasoning: {decision.reasoning}")
-            
-            # Call step callback if provided
-            if self.on_step:
-                self.on_step(step, state, decision)
-            
-            # 3. CHECK: Handle terminal actions
-            if decision.action == "done":
-                state.update_status(Status.DONE)
-                logger.info("Goal achieved!")
-                await self.middleware.after_step(step_ctx)
-                await self._publish_event(EventType.STEP_COMPLETED, {
-                    "step": state.step_count,
-                    "action": "done"
-                })
-                break
-            
-            if decision.action == "fail":
-                state.update_status(Status.FAILED)
-                logger.warning("Goal failed")
-                await self.middleware.after_step(step_ctx)
-                await self._publish_event(EventType.STEP_COMPLETED, {
-                    "step": state.step_count,
-                    "action": "fail"
-                })
-                break
-            
-            # 4. ACT: Execute worker(s)
-            if decision.action == "call" and decision.calls:
-                # Single worker call
-                await self._execute_worker(state, decision.calls[0])
-                # Advance blueprint step if needed
-                if blueprint:
-                    blueprint.increment_step_iteration(state)
-                    blueprint.advance_step(state)
-            elif decision.action == "call_independent" and decision.calls:
-                # Independent parallel worker calls (stale read warning: each sees state at T0)
-                await self._execute_workers_parallel(state, decision.calls)
-            
-            # After step middleware hook
-            await self.middleware.after_step(step_ctx)
-            
-            # Check if middleware skipped further execution
-            if step_ctx.skip_step:
-                break
-            
-            # Check if a worker requested pause (e.g., HumanProxyWorker)
-            if state.status == Status.PAUSED:
-                logger.info("Execution paused (awaiting input)")
-                await self._publish_event(EventType.ORCHESTRATOR_PAUSED, {
-                    "step": state.step_count,
-                    "pending_input": state.pending_input
-                })
-                break
-            
-            await self._publish_event(EventType.STEP_COMPLETED, {
-                "step": state.step_count,
-                "action": decision.action,
-                "workers_called": len(decision.calls)
-            })
-            
-            # Auto-save if configured
-            if self.auto_save_path:
-                state.save_to_json(self.auto_save_path)
-                await self._publish_event(EventType.STATE_SAVED, {"path": self.auto_save_path})
-            
-            # Save to persistence layer if configured (for step-by-step trace recovery)
-            if self.persistence:
-                session_id = state.metadata.get("session_id", "default")
-                parent_session_id = state.metadata.get("parent_session_id")
-                try:
-                    await self.persistence.save(state, session_id, parent_session_id=parent_session_id)
-                    
-                    # Save checkpoint for time-travel debugging if persistence supports it
-                    if hasattr(self.persistence, 'save_checkpoint'):
-                        await self.persistence.save_checkpoint(session_id, state.step_count, state)
-                except Exception as e:
-                    logger.warning(f"Persistence save failed: {e}")
-            
-            # Check for graceful shutdown request
-            if self._shutdown_requested:
-                logger.info("Graceful shutdown: saving state and exiting...")
-                if self.auto_save_path:
-                    state.save_to_json(self.auto_save_path)
-                state.update_status(Status.PAUSED)
-                state.metadata["shutdown_reason"] = "graceful_shutdown"
-                await self._publish_event(EventType.ORCHESTRATOR_COMPLETED, {
-                    "status": "paused",
-                    "reason": "graceful_shutdown",
-                    "step_count": state.step_count
-                })
-                break
-        else:
-            # Max steps reached without completion
-            if state.status not in (Status.DONE, Status.FAILED):
-                state.update_status(Status.FAILED)
-                logger.warning(f"Max steps ({max_steps}) reached")
-        
-        # Publish completion event
-        await self._publish_event(EventType.ORCHESTRATOR_COMPLETED, {
+        completed_event_payload: Dict[str, Any] = {
             "status": state.status.value,
             "step_count": state.step_count,
             "artifacts_count": len(state.artifacts)
-        })
-        
-        # Stop heartbeat when run ends
-        await self._stop_heartbeat()
-        
+        }
+
+        try:
+            await self._start_heartbeat(session_id)
+
+            for step in range(max_steps):
+                state.increment_step()
+                self._reset_step_usage_tracking(state)
+
+                await self._publish_event(EventType.STEP_STARTED, {"step": state.step_count})
+                logger.debug(f"Step {state.step_count}")
+
+                if self.auto_summarize and state.should_summarize(
+                    artifact_threshold=self.summarize_thresholds.get("artifacts", 10),
+                    feedback_threshold=self.summarize_thresholds.get("feedback", 20),
+                    step_threshold=self.summarize_thresholds.get("steps", 50)
+                ):
+                    await self._auto_summarize(state)
+
+                step_ctx = StepContext(step_number=state.step_count, state=state)
+
+                await self.middleware.before_step(step_ctx)
+                if step_ctx.skip_step:
+                    logger.debug("Step skipped by middleware")
+                    if state.status in (Status.DONE, Status.FAILED, Status.PAUSED):
+                        break
+                    continue
+
+                if blueprint and blueprint.is_complete(state):
+                    state.update_status(Status.DONE)
+                    step_ctx.decision = SupervisorDecision(
+                        action="done",
+                        reasoning="Workflow completed all phases"
+                    )
+                    await self.middleware.after_step(step_ctx)
+                    await self._publish_event(EventType.STEP_COMPLETED, {
+                        "step": state.step_count,
+                        "action": "done",
+                        "workers_called": 0
+                    })
+                    break
+
+                context = state.to_context_string()
+                decision = await self._get_supervisor_decision(context, state, blueprint)
+                step_ctx.decision = decision
+
+                logger.debug(f"Decision: {decision.action} -> {[c.worker_name for c in decision.calls]}")
+                logger.debug(f"Reasoning: {decision.reasoning}")
+
+                if self.on_step:
+                    self.on_step(step, state, decision)
+
+                if decision.action == "done":
+                    state.update_status(Status.DONE)
+                    logger.info("Goal achieved!")
+                    await self.middleware.after_step(step_ctx)
+                    await self._publish_event(EventType.STEP_COMPLETED, {
+                        "step": state.step_count,
+                        "action": "done",
+                        "workers_called": 0
+                    })
+                    break
+
+                if decision.action == "fail":
+                    state.update_status(Status.FAILED)
+                    logger.warning("Goal failed")
+                    await self.middleware.after_step(step_ctx)
+                    await self._publish_event(EventType.STEP_COMPLETED, {
+                        "step": state.step_count,
+                        "action": "fail",
+                        "workers_called": 0
+                    })
+                    break
+
+                execution_succeeded = False
+                if decision.action == "call" and decision.calls:
+                    execution_succeeded = await self._execute_worker(state, decision.calls[0])
+                elif decision.action == "call_independent" and decision.calls:
+                    execution_succeeded = await self._execute_workers_parallel(state, decision.calls)
+                else:
+                    state.update_status(Status.FAILED)
+                    state.add_feedback(Feedback(
+                        source="Orchestrator",
+                        critique=f"Invalid supervisor action: {decision.action}",
+                        passed=False
+                    ))
+
+                if blueprint and execution_succeeded:
+                    blueprint.increment_step_iteration(state)
+                    blueprint.mark_current_step_completed(state)
+                    blueprint.advance_step(state)
+                    if blueprint.is_complete(state):
+                        state.update_status(Status.DONE)
+
+                await self.middleware.after_step(step_ctx)
+
+                if step_ctx.skip_step:
+                    break
+
+                if state.status == Status.PAUSED:
+                    logger.info("Execution paused (awaiting input)")
+                    await self._publish_event(EventType.ORCHESTRATOR_PAUSED, {
+                        "step": state.step_count,
+                        "pending_input": state.pending_input
+                    })
+                    await self._publish_event(EventType.STEP_COMPLETED, {
+                        "step": state.step_count,
+                        "action": decision.action,
+                        "workers_called": len(decision.calls)
+                    })
+                    break
+
+                await self._publish_event(EventType.STEP_COMPLETED, {
+                    "step": state.step_count,
+                    "action": "done" if state.status == Status.DONE else decision.action,
+                    "workers_called": len(decision.calls)
+                })
+
+                if state.status in (Status.DONE, Status.FAILED):
+                    break
+
+                if self._shutdown_requested:
+                    logger.info("Graceful shutdown: saving state and exiting...")
+                    state.update_status(Status.PAUSED)
+                    state.metadata["shutdown_reason"] = "graceful_shutdown"
+                    await self._publish_event(EventType.ORCHESTRATOR_PAUSED, {
+                        "step": state.step_count,
+                        "pending_input": state.pending_input,
+                        "reason": "graceful_shutdown"
+                    })
+                    break
+
+                await self._persist_state(state)
+            else:
+                if state.status not in (Status.DONE, Status.FAILED):
+                    state.update_status(Status.FAILED)
+                    logger.warning(f"Max steps ({max_steps}) reached")
+        finally:
+            try:
+                if state is not None:
+                    await self._persist_state(state)
+                    completed_event_payload = {
+                        "status": state.status.value,
+                        "step_count": state.step_count,
+                        "artifacts_count": len(state.artifacts)
+                    }
+                    if state.metadata.get("shutdown_reason"):
+                        completed_event_payload["reason"] = state.metadata["shutdown_reason"]
+            finally:
+                await self._publish_event(EventType.ORCHESTRATOR_COMPLETED, completed_event_payload)
+                await self._stop_heartbeat()
+
         return state
 
     async def _execute_workers_parallel(
         self,
         state: Blackboard,
         calls: List[WorkerCall]
-    ) -> List[Optional[WorkerOutput]]:
-        """Execute multiple workers in parallel using asyncio.gather."""
+    ) -> bool:
+        """Execute multiple workers in parallel and report batch success."""
         if not self.enable_parallel:
-            # Fall back to sequential execution
-            results = []
+            batch_success = True
             for call in calls:
-                await self._execute_worker(state, call)
-                results.append(None)  # Results already applied to state
-            return results
-        
-        # Filter to only parallel-safe workers
+                batch_success = await self._execute_worker(state, call) and batch_success
+            return batch_success
+
         safe_calls = []
+        batch_success = True
         for call in calls:
             worker = self.registry.get(call.worker_name)
             if worker and worker.parallel_safe:
                 safe_calls.append(call)
             elif worker:
                 logger.warning(f"Worker '{call.worker_name}' is not parallel-safe, executing sequentially")
-                await self._execute_worker(state, call)
-        
+                batch_success = await self._execute_worker(state, call) and batch_success
+
         if not safe_calls:
-            return []
-        
+            return batch_success
+
         logger.debug(f"Executing {len(safe_calls)} workers in parallel")
-        
-        # Create tasks for parallel execution
         tasks = [
             self._execute_worker_get_output(state, call)
             for call in safe_calls
         ]
-        
-        # Execute in parallel
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Apply results to state (sequentially to maintain consistency)
+
         for call, result in zip(safe_calls, results):
             if isinstance(result, Exception):
-                # Let failures fail - no heuristic retry
                 logger.error(f"Parallel worker '{call.worker_name}' failed: {result}")
                 state.add_feedback(Feedback(
                     source="Orchestrator",
                     critique=f"Worker '{call.worker_name}' failed: {str(result)}",
                     passed=False
                 ))
+                batch_success = False
             elif result is not None:
                 worker = self.registry.get(call.worker_name)
                 if worker:
                     self._apply_worker_output(state, result, worker.name)
-        
-        return results
+
+        return batch_success
 
     async def _execute_worker_get_output(
         self,
@@ -855,7 +972,7 @@ class Orchestrator:
             })
             raise
 
-    async def _execute_worker(self, state: Blackboard, call: WorkerCall) -> None:
+    async def _execute_worker(self, state: Blackboard, call: WorkerCall) -> bool:
         """Execute a single worker with retry logic and middleware support."""
         from .middleware import WorkerContext
         
@@ -863,7 +980,7 @@ class Orchestrator:
         
         if worker is None:
             logger.warning(f"Worker '{call.worker_name}' not found")
-            return
+            return False
         
         # Create worker context for middleware
         worker_ctx = WorkerContext(worker=worker, call=call, state=state)
@@ -879,10 +996,10 @@ class Orchestrator:
                 await self.middleware.on_error(worker_ctx)
                 state.add_feedback(Feedback(
                     source="Middleware",
-                    critique=f"Worker '{call.worker_name}' skipped: {str(worker_ctx.error)}",
-                    passed=False
-                ))
-            return
+                        critique=f"Worker '{call.worker_name}' skipped: {str(worker_ctx.error)}",
+                        passed=False
+                    ))
+            return False
         
         # Update status based on worker type (heuristic)
         if "critic" in worker.name.lower() or "review" in worker.name.lower():
@@ -965,7 +1082,8 @@ class Orchestrator:
                     "passed": final_output.feedback.passed,
                     "source": worker.name
                 })
-                
+            return True
+                 
         except Exception as e:
             logger.error(f"Worker error: {e}")
             worker_ctx.error = e
@@ -983,6 +1101,7 @@ class Orchestrator:
                 critique=f"Worker '{call.worker_name}' failed: {str(e)}",
                 passed=False
             ))
+            return False
 
     def run_sync(
         self,
@@ -992,19 +1111,6 @@ class Orchestrator:
     ) -> Blackboard:
         """Synchronous wrapper for run(). Safe to call inside existing event loops."""
         return _run_sync(self.run(goal=goal, state=state, max_steps=max_steps))
-
-    def set_persistence(self, persistence) -> None:
-        """
-        Set the persistence layer for save/resume.
-        
-        Args:
-            persistence: PersistenceLayer implementation
-            
-        Example:
-            from blackboard.persistence import RedisPersistence
-            orchestrator.set_persistence(RedisPersistence("redis://localhost"))
-        """
-        self.persistence = persistence
 
     async def pause(
         self, 
@@ -1134,9 +1240,9 @@ Provide a 1-2 paragraph summary:'''
             else:
                 response = result
             
-            # Handle LLMResponse or string
             if isinstance(response, LLMResponse):
                 summary = response.content
+                self._record_usage(state, response.usage, context="summarizer")
             else:
                 summary = response
             
@@ -1168,41 +1274,81 @@ Provide a 1-2 paragraph summary:'''
         blueprint: Optional["Blueprint"] = None
     ) -> SupervisorDecision:
         """Ask the LLM supervisor what to do next."""
-        
-        # Use tool calling if available
-        if self._supports_tool_calling and self.use_tool_calling and self._tool_definitions:
-            return await self._get_decision_via_tools(context, state, blueprint)
-        
-        # Fallback to JSON-based approach
-        return await self._get_decision_via_json(context, state, blueprint)
+        decision = await self._request_supervisor_decision(context, state, blueprint)
+        validation_error = self._validate_blueprint_decision(decision, state, blueprint)
+        if validation_error is None:
+            return decision
+
+        logger.warning(f"Supervisor decision violated blueprint: {validation_error}")
+        corrected = await self._request_supervisor_decision(
+            context,
+            state,
+            blueprint,
+            correction=validation_error
+        )
+        corrected_error = self._validate_blueprint_decision(corrected, state, blueprint)
+        if corrected_error is None:
+            return corrected
+
+        return SupervisorDecision(
+            action="fail",
+            reasoning=f"Blueprint violation after retry: {corrected_error}"
+        )
+
+    async def _request_supervisor_decision(
+        self,
+        context: str,
+        state: Blackboard,
+        blueprint: Optional["Blueprint"] = None,
+        correction: Optional[str] = None
+    ) -> SupervisorDecision:
+        """Request a supervisor decision via tool calling or JSON prompting."""
+        if self._supports_tool_calling and self.use_tool_calling:
+            tool_definitions = self._get_tool_definitions_for_state(state, blueprint)
+            if tool_definitions:
+                return await self._get_decision_via_tools(
+                    context,
+                    state,
+                    blueprint,
+                    tool_definitions=tool_definitions,
+                    correction=correction
+                )
+
+        return await self._get_decision_via_json(context, state, blueprint, correction=correction)
     
     async def _get_decision_via_tools(
         self, 
         context: str, 
         state: Blackboard,
-        blueprint: Optional["Blueprint"] = None
+        blueprint: Optional["Blueprint"] = None,
+        tool_definitions: Optional[List[ToolDefinition]] = None,
+        correction: Optional[str] = None
     ) -> SupervisorDecision:
         """Get decision using native tool calling."""
-        # Build prompt with optional blueprint context
         blueprint_context = blueprint.get_prompt_context(state) if blueprint else ""
+        correction_prompt = (
+            f"\n## Correction\n{correction}\nYou MUST follow this correction exactly.\n"
+            if correction
+            else ""
+        )
         
         simple_prompt = f"""You are a supervisor coordinating workers to achieve the goal.
 
 ## Current State
 {context}
 {blueprint_context}
+{correction_prompt}
 Choose the best action: call a worker tool, mark_done if complete, or mark_failed if impossible."""
         
         try:
-            result = self.llm.generate_with_tools(simple_prompt, self._tool_definitions)
+            result = self.llm.generate_with_tools(simple_prompt, tool_definitions or [])
             if asyncio.iscoroutine(result):
                 response = await result
             else:
                 response = result
+            self._record_usage_from_client(state, context="supervisor")
             
-            # Handle tool calls
             if isinstance(response, list) and response:
-                # LLM returned tool calls
                 calls = []
                 for tool_call in response:
                     if isinstance(tool_call, ToolCall):
@@ -1250,7 +1396,7 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         except Exception as e:
             if self.allow_json_fallback:
                 logger.warning(f"Tool calling failed, falling back to JSON: {e}")
-                return await self._get_decision_via_json(context, state)
+                return await self._get_decision_via_json(context, state, blueprint, correction=correction)
             else:
                 raise RuntimeError(
                     f"Tool calling failed and allow_json_fallback=False: {e}"
@@ -1260,13 +1406,12 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
         self, 
         context: str, 
         state: Blackboard,
-        blueprint: Optional["Blueprint"] = None
+        blueprint: Optional["Blueprint"] = None,
+        correction: Optional[str] = None
     ) -> SupervisorDecision:
         """Get decision using the configured reasoning strategy."""
-        # Build worker list for the strategy
         worker_info = self.registry.list_workers_with_schemas()
         
-        # Filter workers if blueprint is active
         if blueprint:
             allowed = blueprint.filter_workers(list(worker_info.keys()), state)
             worker_info = {k: v for k, v in worker_info.items() if k in allowed}
@@ -1279,15 +1424,18 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
                 desc += " (accepts structured input)"
             workers_dict[name] = desc
         
-        # Build prompt using strategy
         full_prompt = self.strategy.build_prompt(
             context=context,
             workers=workers_dict
         )
         
-        # Append blueprint context if active
         if blueprint:
             full_prompt += blueprint.get_prompt_context(state)
+        if correction:
+            full_prompt += (
+                f"\n\n## Correction\n{correction}\n"
+                "You MUST follow this correction exactly in your next response."
+            )
         
         try:
             result = self.llm.generate(full_prompt)
@@ -1296,27 +1444,15 @@ Choose the best action: call a worker tool, mark_done if complete, or mark_faile
             else:
                 response = result
             
-            # Handle LLMResponse or plain string
             content: str
             if isinstance(response, LLMResponse):
                 content = response.content
-                # Track usage
-                if response.usage and self.usage_tracker:
-                    self.usage_tracker.record(response.usage, context="supervisor")
-                # Store in state metadata
-                if response.usage:
-                    state.metadata["last_usage"] = {
-                        "input_tokens": response.usage.input_tokens,
-                        "output_tokens": response.usage.output_tokens,
-                        "model": response.usage.model
-                    }
+                self._record_usage(state, response.usage, context="supervisor")
             else:
                 content = response
             
-            # Parse response using strategy
             decision = self.strategy.parse_response(content)
             
-            # Convert Strategy Decision -> SupervisorDecision
             calls = []
             for call in decision.calls:
                 calls.append(WorkerCall(
