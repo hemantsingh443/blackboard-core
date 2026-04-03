@@ -133,7 +133,7 @@ from .optimize import (
     run_optimization,
 )
 
-__version__ = "1.8.0"
+__version__ = "1.8.1"
 
 __all__ = [
     # State
