@@ -9,6 +9,7 @@ import pytest
 import tempfile
 import os
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from blackboard import Blackboard, Status, Artifact, Worker, WorkerOutput
 
@@ -149,6 +150,39 @@ class TestSandbox:
             assert result.success
             assert "4" in result.stdout
         
+        asyncio.run(test())
+
+    def test_docker_sandbox_timeout_kills_container_by_name(self):
+        """Test Docker timeout cleanup targets the generated container name."""
+        from blackboard.sandbox import DockerSandbox, SandboxTimeoutError
+
+        async def test():
+            process = MagicMock()
+            process.pid = 12345
+            process.communicate = MagicMock(return_value=object())
+            process.kill = MagicMock()
+            process.wait = AsyncMock()
+
+            with patch("blackboard.sandbox.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)) as create_proc:
+                with patch("blackboard.sandbox.asyncio.wait_for", new=AsyncMock(side_effect=asyncio.TimeoutError)):
+                    with patch("blackboard.sandbox.subprocess.run") as docker_run:
+                        sandbox = DockerSandbox(timeout=1)
+                        with pytest.raises(SandboxTimeoutError):
+                            await sandbox.execute("import time; time.sleep(10)")
+
+                        command = create_proc.call_args.args
+                        name_arg = next(arg for arg in command if arg.startswith("--name="))
+                        container_name = name_arg.split("=", 1)[1]
+
+                        assert container_name.startswith("blackboard-sandbox-")
+                        docker_run.assert_called_once_with(
+                            ["docker", "kill", container_name],
+                            capture_output=True,
+                        )
+                        assert docker_run.call_args.args[0][2] != str(process.pid)
+                        process.kill.assert_called_once()
+                        process.wait.assert_awaited_once()
+
         asyncio.run(test())
 
 

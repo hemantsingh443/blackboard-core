@@ -19,12 +19,22 @@ Requirements:
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING
+
+from pydantic import Field
+
+from blackboard.protocols import WorkerInput
 
 logger = logging.getLogger("blackboard.integrations.llamaindex")
 
 if TYPE_CHECKING:
     from llama_index.core.query_engine import BaseQueryEngine
+
+
+class LlamaIndexInput(WorkerInput):
+    """Input schema for LlamaIndex query workers."""
+
+    query: str = Field(..., description="The search query")
 
 
 def wrap_query_engine(
@@ -70,16 +80,7 @@ def wrap_query_engine(
         name = worker_name
         description = worker_description
         parallel_safe = True
-        input_schema = {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The search query"
-                }
-            },
-            "required": ["query"]
-        }
+        input_schema = LlamaIndexInput
         
         def __init__(self):
             super().__init__()
@@ -91,7 +92,10 @@ def wrap_query_engine(
                 # Get query from inputs or use goal
                 query = state.goal
                 if inputs:
-                    query = inputs.get("query", query)
+                    if isinstance(inputs, dict):
+                        query = inputs.get("query", query)
+                    else:
+                        query = getattr(inputs, "query", query)
                 
                 # QueryEngine.query() is sync - run in thread
                 response = await asyncio.to_thread(self._engine.query, query)

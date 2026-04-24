@@ -4,6 +4,7 @@ import pytest
 import sys
 import warnings
 from unittest.mock import MagicMock, AsyncMock
+from pydantic import BaseModel, Field
 
 # Check if textual is available
 try:
@@ -117,6 +118,75 @@ class TestLangChainAdapter:
         assert output.has_artifact()
         assert "42" in output.artifact.content
         assert output.artifact.metadata["source"] == "langchain"
+
+    @pytest.mark.asyncio
+    async def test_wrapped_tool_uses_pydantic_schema_and_dict_inputs(self):
+        """Test LangChain wrapper exposes a Worker-compatible schema."""
+        from blackboard.integrations.langchain import wrap_tool
+        from blackboard.tools import worker_to_tool_definition
+        from blackboard import Blackboard
+
+        class AddInput(BaseModel):
+            a: int = Field(..., description="First number")
+            b: int = Field(..., description="Second number")
+
+        mock_tool = MagicMock()
+        mock_tool.name = "add"
+        mock_tool.description = "Add numbers"
+        mock_tool.args_schema = AddInput
+        mock_tool.invoke = MagicMock(return_value="5")
+
+        worker = wrap_tool(mock_tool)
+        schema = worker.get_schema_json()
+        tool = worker_to_tool_definition(worker)
+        inputs = worker.parse_inputs({"a": 2, "b": 3})
+
+        assert schema["properties"]["a"]["type"] == "integer"
+        assert "a" in [p.name for p in tool.parameters]
+
+        output = await worker.run(Blackboard(goal="Add"), inputs)
+
+        assert output.has_artifact()
+        mock_tool.invoke.assert_called_once_with({"a": 2, "b": 3})
+
+    def test_wrapped_tool_converts_json_schema_to_worker_input(self):
+        """Test LangChain wrapper accepts JSON-schema-only args schemas."""
+        from blackboard.integrations.langchain import wrap_tool
+        from blackboard.protocols import WorkerInput
+        from blackboard.tools import worker_to_tool_definition
+
+        class JsonOnlyArgs:
+            @staticmethod
+            def schema():
+                return {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 5,
+                        },
+                    },
+                    "required": ["query"],
+                }
+
+        mock_tool = MagicMock()
+        mock_tool.name = "search"
+        mock_tool.description = "Search things"
+        mock_tool.args_schema = JsonOnlyArgs
+        mock_tool.invoke = MagicMock(return_value="results")
+
+        worker = wrap_tool(mock_tool)
+        inputs = worker.parse_inputs({"query": "blackboard"})
+        tool = worker_to_tool_definition(worker)
+
+        assert issubclass(worker.input_schema, WorkerInput)
+        assert inputs.query == "blackboard"
+        assert inputs.limit == 5
+        assert "query" in [p.name for p in tool.parameters]
     
     @pytest.mark.skipif(
         "langchain_core" not in sys.modules,
@@ -162,6 +232,49 @@ class TestLlamaIndexAdapter:
         
         assert isinstance(worker, Worker)
         assert worker.name == "DocSearch"
+
+    @pytest.mark.asyncio
+    async def test_wrapped_engine_schema_and_parsed_inputs(self):
+        """Test LlamaIndex wrapper exposes a Worker-compatible schema."""
+        from blackboard.integrations.llamaindex import wrap_query_engine
+        from blackboard.tools import worker_to_tool_definition
+        from blackboard import Blackboard
+
+        mock_engine = MagicMock()
+        mock_engine.query = MagicMock(return_value="RAG response")
+
+        worker = wrap_query_engine(mock_engine, name="DocSearch")
+        schema = worker.get_schema_json()
+        tool = worker_to_tool_definition(worker)
+        inputs = worker.parse_inputs({"query": "What is X?"})
+
+        assert "query" in schema["properties"]
+        assert "query" in [p.name for p in tool.parameters]
+        assert inputs.query == "What is X?"
+
+        output = await worker.run(Blackboard(goal="Fallback goal"), inputs)
+
+        assert output.has_artifact()
+        mock_engine.query.assert_called_once_with("What is X?")
+
+    @pytest.mark.asyncio
+    async def test_wrapped_engine_accepts_generic_worker_input(self):
+        """Test generic WorkerInput falls back to the blackboard goal."""
+        from blackboard.integrations.llamaindex import wrap_query_engine
+        from blackboard.protocols import WorkerInput
+        from blackboard import Blackboard
+
+        mock_engine = MagicMock()
+        mock_engine.query = MagicMock(return_value="RAG response")
+
+        worker = wrap_query_engine(mock_engine, name="DocSearch")
+        output = await worker.run(
+            Blackboard(goal="Fallback goal"),
+            WorkerInput(instructions="Use the available goal"),
+        )
+
+        assert output.has_artifact()
+        mock_engine.query.assert_called_once_with("Fallback goal")
     
     @pytest.mark.asyncio
     async def test_wrapped_engine_execution(self):

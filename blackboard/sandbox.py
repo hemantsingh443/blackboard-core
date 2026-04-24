@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import os
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Protocol, runtime_checkable
 
@@ -273,10 +274,12 @@ class DockerSandbox:
         start_time = time.time()
         
         timeout = timeout or self.timeout
+        container_name = f"blackboard-sandbox-{uuid.uuid4().hex[:12]}"
         
         # Build docker command
         cmd = [
             "docker", "run", "--rm",
+            f"--name={container_name}",
             f"--memory={self.memory_limit}",
             f"--cpus={self.cpu_limit}",
         ]
@@ -306,7 +309,9 @@ class DockerSandbox:
                 )
             except asyncio.TimeoutError:
                 # Kill the container
-                subprocess.run(["docker", "kill", str(process.pid)], capture_output=True)
+                subprocess.run(["docker", "kill", container_name], capture_output=True)
+                process.kill()
+                await process.wait()
                 raise SandboxTimeoutError(f"Docker execution timed out after {timeout}s")
             
             execution_time = time.time() - start_time

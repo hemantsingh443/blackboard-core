@@ -18,7 +18,9 @@ Requirements:
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Dict, Optional, Type
+from typing import TYPE_CHECKING, Any, Optional
+
+from pydantic import BaseModel
 
 logger = logging.getLogger("blackboard.integrations.langchain")
 
@@ -53,18 +55,28 @@ def wrap_tool(
     """
     from blackboard import Worker, WorkerOutput
     from blackboard.state import Artifact
+    from blackboard.integrations._schemas import json_schema_to_worker_input
     
-    # Get schema using Pydantic v2 model_json_schema()
+    # Get a Worker-compatible Pydantic input schema.
     input_schema = None
     if hasattr(tool, "args_schema") and tool.args_schema is not None:
-        try:
-            input_schema = tool.args_schema.model_json_schema()
-        except AttributeError:
-            # Fallback for Pydantic v1 compatibility
+        args_schema = tool.args_schema
+        if isinstance(args_schema, type) and issubclass(args_schema, BaseModel):
+            input_schema = args_schema
+        else:
             try:
-                input_schema = tool.args_schema.schema()
-            except Exception:
-                pass
+                schema_dict = args_schema.model_json_schema()
+            except AttributeError:
+                # Fallback for Pydantic v1 compatibility
+                try:
+                    schema_dict = args_schema.schema()
+                except Exception:
+                    schema_dict = None
+            if schema_dict:
+                input_schema = json_schema_to_worker_input(
+                    schema_dict,
+                    model_name=f"{tool.name.title().replace('_', '')}Input",
+                )
     
     worker_name = name or tool.name
     worker_description = description or tool.description or f"LangChain tool: {tool.name}"
@@ -80,7 +92,7 @@ def wrap_tool(
             self._input_schema = input_schema
         
         @property
-        def input_schema(self) -> Optional[Dict[str, Any]]:
+        def input_schema(self) -> Any:
             return self._input_schema
         
         async def run(self, state, inputs=None) -> WorkerOutput:
@@ -88,7 +100,13 @@ def wrap_tool(
             try:
                 # LangChain tools have sync invoke() - run in thread
                 if inputs:
-                    result = await asyncio.to_thread(self._tool.invoke, inputs)
+                    if isinstance(inputs, dict):
+                        tool_input = inputs
+                    elif hasattr(inputs, "model_dump"):
+                        tool_input = inputs.model_dump()
+                    else:
+                        tool_input = dict(inputs)
+                    result = await asyncio.to_thread(self._tool.invoke, tool_input)
                 else:
                     # Use goal as default input if no specific inputs
                     result = await asyncio.to_thread(self._tool.invoke, {"query": state.goal})
